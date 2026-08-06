@@ -1,0 +1,25 @@
+# Sample multi-track note list input
+# Use @track / #track / [Name] directives to start a new track.
+# Without directives, all notes go on a single Melody track.
+# Same-line pitches share one beat: C4 E4 G4 q
+
+@track Melody acoustic_grand_piano
+C4 quarter
+E4 quarter
+G4 half
+rest quarter
+C5 quarter
+B4 quarter
+A4 half
+
+@track Bass electric_bass_finger
+C2 half
+G2 half
+A2 half
+F2 half
+
+[Chords electric_piano_1]
+C3 E3 G3 whole 70
+G3 B3 D4 whole 70
+A3 C4 E4 whole 70
+F3 A3 C4 whole 70

@@ -1,0 +1,953 @@
+================================================================================
+                         MIDIGEN — TECHNICAL DOCUMENTATION
+                              Engineering Reference
+================================================================================
+
+  Product          : MIDIgen
+  Version          : 0.1.0
+  Status           : Authoritative engineering reference
+  Audience         : Backend / frontend engineers, QA, API integrators
+  Last updated     : 2026-08-05 (docs synced to code only; humanize ticks fixed)
+  Format           : Plain text
+  Companion guides : README.md | backend/README.md | frontend/README.md
+  Live schemas     : http://127.0.0.1:8000/docs  (when API is running)
+
+  HOW TO KEEP THIS FILE PERFECT
+  -----------------------------
+  Update this file in the SAME change set as behavioral code changes.
+  Document ONLY what exists in the repo (code / tests / Studio). Do not add
+  planned libraries, researched alternatives, or features not shipped.
+  After edits, verify against: pytest, OpenAPI /docs, and Studio UI labels.
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+   1.  Purpose
+   2.  Goals and non-goals
+   3.  High-level architecture
+   4.  Technology stack
+   5.  Repository layout
+   6.  Generation pipelines
+   7.  Core domain model
+   8.  Shared request options
+   9.  HTTP API reference
+  10.  Frontend (Studio)
+  11.  AI integration
+  12.  CLI
+  13.  Configuration reference
+  14.  Local development
+  15.  Testing
+  16.  Deployment checklist
+  17.  Security
+  18.  Extension guide
+  19.  Troubleshooting
+  20.  Design decisions
+  21.  Known limitations
+  22.  Glossary
+  23.  Related documents
+  24.  Revision history
+
+
+================================================================================
+1. PURPOSE
+================================================================================
+
+MIDIgen generates Standard MIDI Files (SMF / .mid) from three input modes:
+
+  Mode             Input                         AI (local)   Output semantics
+  ---------------  ----------------------------  ----------  ------------------------------------------
+  Text → MIDI     Natural-language prompt       Yes         LLM → composition JSON → MidiEngine
+  Chords → MIDI   Progression (e.g. C-G-Am-F)   No          Exact voicings from chord symbols
+  Notes → MIDI    Line-oriented note list        No          Exact pitch, duration, velocity, tracks
+
+Exports are SMF Type 0 (single merged track) or Type 1 (multi-track with
+Conductor). Target DAWs: Ableton Live, FL Studio, Logic Pro, Cubase, Reaper,
+Studio One, and other SMF-compatible hosts.
+
+This file is the system-of-record for architecture, contracts, and ops. READMEs
+are short setup guides. OpenAPI (/docs) is the live schema (may include field
+descriptions not repeated here in full).
+
+
+================================================================================
+2. GOALS AND NON-GOALS
+================================================================================
+
+GOALS
+-----
+  * Produce valid, DAW-loadable MIDI (tempo, meter, programs, channels).
+  * Separate creative generation (LLM, text only) from deterministic
+    rendering (chords/notes + engine + post-processors).
+  * Shared HTTP post-pipeline for all generate endpoints (Studio + REST).
+  * Chords and Notes modes do not call the local LLM (exact, offline).
+  * Reject empty / fully muted mixes; validate SMF after write.
+
+NON-GOALS
+---------
+  * Real-time MIDI streaming / Web MIDI.
+  * Audio synthesis or sample playback.
+  * Auth, billing, or multi-tenant rate limits (local / trusted-network).
+  * Guaranteed “perfect” musical AI output (quality varies by model/prompt).
+
+
+================================================================================
+3. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+  +-----------------------------------------------------------------+
+  |                  Next.js Studio (frontend :3000)                 |
+  |    modes · mixer · timing · expression · download .mid          |
+  +------------------------------+----------------------------------+
+                                 | HTTP JSON
+                                 v
+  +-----------------------------------------------------------------+
+  |              FastAPI backend (default :8000)                      |
+  |  /generate/*  /parse/text  /meta/*  /health                       |
+  +-------+------------------+------------------+-------------------+
+          | text             | chords           | notes
+          v                  v                  v
+     +-----------+    +---------------+   +---------------+
+     | Local GGUF|    | exact.py      |   | Notes line    |
+     | (Qwen)    |    | chord voicer  |   | parser        |
+     +-----+-----+    +-------+-------+   +-------+-------+
+           |                  |                   |
+           | composition JSON |                   |
+           v                  v                   v
+     +-----------+    +-----------------------------------+
+     | composer  |--->|           MidiEngine              |
+     +-----------+    +-------------------+---+-----------+
+                                          |
+                                          v
+         HTTP post-pipeline (§6.1)
+                  |
+                  v
+         MidiEngine.export → SMF validate → FileResponse (.mid)
+
+DESIGN PRINCIPLE
+----------------
+Routers stay thin. Features build a MidiEngine; app/shared/midi_response.py
+owns mix, selection, expression, timing, and export helpers so REST modes stay
+aligned.
+
+Expression runs BEFORE timing so generated sustain / modulation / pitch-bend
+events are also quantized, swung, and optionally humanized.
+
+
+================================================================================
+4. TECHNOLOGY STACK
+================================================================================
+
+  Layer            Choice                              Role
+  ---------------  ----------------------------------  ----------------------------------
+  Backend API      FastAPI + Uvicorn                   REST, OpenAPI, CORS, file download
+  Validation       Pydantic v2                         Request contracts / bounds
+  MIDI I/O         mido                                SMF Type 0 / 1 encode
+  LLM              Local llama.cpp GGUF                 Text mode composition JSON only
+  Exact chords     chords_to_midi/exact.py              Progression → exact MIDI tones
+  Notes parser     notes_to_midi/inputs.py              Line list → exact MIDI tones
+  Config           python-dotenv                       backend/.env
+  Frontend         Next.js 15 App Router + React 19    Studio UI
+  Styling          Tailwind CSS 4                      Studio styles
+  Package          midigen-backend (pip install -e .)  midi-gen CLI
+  Tests            pytest                              SMF / export / UI→MIDI
+
+RUNTIME
+-------
+  * Python 3.10+
+  * Node.js 18+ (Studio)
+  * Local GGUF model for text mode (chords/notes are exact / offline)
+
+
+================================================================================
+5. REPOSITORY LAYOUT
+================================================================================
+
+  MIDI/
+  |-- DOCUMENTATION.txt              <-- this file (authoritative)
+  |-- README.md                      product overview + quick start
+  |-- start-backend.bat
+  |-- start-frontend.bat
+  |-- backend/
+  |   |-- app/
+  |   |   |-- main.py                FastAPI app, CORS, /health
+  |   |   |-- cli.py                 midi-gen
+  |   |   |-- core/                  engine, theory, timing, expression, GM,
+  |   |   |                          catalog, instruments, smf_validate
+  |   |   |-- features/
+  |   |   |   |-- text_to_midi/      /generate/text, /preview, /parse/text
+  |   |   |   |-- chords_to_midi/    /generate/chords + exact.py (no LLM)
+  |   |   |   |-- notes_to_midi/     /generate/notes (no LLM)
+  |   |   |   |-- generation/        ai_client, prompts, composer, service
+                                       (text AI; chords → exact.py via service)
+  |   |   |   +-- meta/              /meta/instruments, /styles, /ai
+  |   |   +-- shared/                schemas, midi_response, http_errors
+  |   |-- models/                    Qwen GGUF here (text mode only)
+  |   |-- generated/                 Archived .mid + _last_model_raw.json.txt
+  |   |-- examples/                  generate_samples.py, notes_example.txt
+  |   |-- samples/                   demo .mid files
+  |   |-- tests/
+  |   |-- run.py
+  |   |-- requirements.txt
+  |   |-- pyproject.toml
+  |   +-- .env.example
+  +-- frontend/
+      |-- src/
+      |   |-- app/                   App Router (/, layout, styles)
+      |   |-- features/studio/
+      |   |   |-- components/        StudioPage.tsx
+      |   |   |-- api/studioApi.ts
+      |   |   |-- types.ts, constants.ts
+      |   +-- shared/ui/
+      |-- .env.example
+      +-- package.json
+
+
+================================================================================
+6. GENERATION PIPELINES
+================================================================================
+
+6.1 SHARED HTTP POST-PIPELINE
+-----------------------------
+Used by POST /generate/text, /generate/text/preview, /generate/chords,
+/generate/notes (notes skips step 3).
+
+  Step  Helper                     What it does
+  ----  -------------------------  ------------------------------------------------------
+   1    apply_score_meta           Time signature + key signature on engine
+   2    apply_track_mix            Mute/solo/vol/pan/instrument/channel
+   3    apply_track_selection      Mute roles the client disabled
+                                   (text + chords only; notes has no role pills)
+   4    apply_expression_options   CC64 / CC1 / pitch bend on active tracks
+   5    apply_timing               Quantize, swing, humanize, PPQ
+   6    ensure_exportable          Fail if nothing audible remains
+   7    send_midi / engine_meta    Export+validate file OR preview JSON
+
+Response download headers (generate file endpoints):
+
+  X-MIDI-BPM | X-MIDI-Bars | X-MIDI-Tracks | X-MIDI-PPQ | X-MIDI-Key | X-MIDI-TimeSig
+
+
+6.2 TEXT → MIDI
+---------------
+
+  Flow:
+    prompt (+ body overrides)
+      → heuristic parse (bars, BPM, key, mood, style, …)
+      → merge overrides
+      → local GGUF → composition JSON
+      → composer → MidiEngine
+      → post-pipeline → .mid
+
+  Endpoints:
+    POST /generate/text           → MIDI download
+    POST /generate/text/preview   → JSON metadata only (same pipeline)
+    POST /parse/text              → parse only; returns fields + "detected" map
+
+  Seed: request seed for AI / humanize reproducibility. When seed is set,
+  AI sampling temperature is forced to 0.2; otherwise
+  max(0.2, AI_TEMPERATURE).
+
+
+6.3 CHORDS → MIDI
+-----------------
+
+  Flow:
+    progression string
+      → parse + validate chord tokens
+      → exact voicing via parse_chord_symbol (NO LLM)
+      → Chords / Bass / Melody(arpeggio) / Drums tracks
+      → post-pipeline → .mid
+
+  Chord track notes are the real pitch classes for each symbol
+  (Am7 → A C E G, E7b9 includes G#, etc.).
+
+  Progression separators (any one style):
+    | pipe/bar     C | G | Am | F   or   | C | G | Am | F |
+    - dash/arrow   C - G - Am - F   /   C -> G   /   C → G
+    , comma        C, G, Am, F
+    whitespace     C G Am F   or one chord per line
+
+  Chord qualities (authoritative table: app/core/theory.py CHORD_QUALITY):
+    V1  maj, m/min, maj7, m7/min7, 7, sus2, sus4, dim  (+ aug)
+    V2  5, 6, m6, add9, madd9, add2, 9, m9, maj9, dim7, m7b5/ø/o, 7sus4, slash C/G
+    V3  11, m11, maj11, 13, m13, maj13, 7b5, 7#5, 7b9, 7#9, 7#11, 7b13, 7alt,
+        maj7#11, 9b5, 9#5, m7#5
+    Aliases: mi, -, power→5, dom7→7, halfdim/ø/o→m7b5, min9→m9, … (see
+    CHORD_QUALITY_ALIASES in theory.py). Do not invent qualities beyond that file.
+
+  Role flags: add_melody, add_chords, add_bass, add_drums
+  (at least one must be true).
+
+  Implementation: app/features/chords_to_midi/exact.py
+  (wired from generate_from_chords — no AI).
+
+  Melody = arpeggio of the same chord tones (harmony-locked).
+  Bass = root / slash bass. Drums = simple deterministic groove.
+
+6.4 NOTES → MIDI
+-----------------
+
+  Flow:
+    notes: string[]
+      → line parser → MidiEngine (no LLM / no GGUF)
+      → post-pipeline WITHOUT apply_track_selection → .mid
+        (still runs: score meta → mix → expression → timing)
+
+  Semantics: Text → exact MIDI events. Pitches, durations, velocities, and
+  track directives are honoured 1:1. Chord-tone list order inside one line
+  (C4 E4 G4 vs E4 C4 G4) does not matter when notes share the same start beat.
+
+  Grammar:
+
+    Construct              Example
+    ---------------------  ---------------------------------------
+    Note + duration        C4 quarter | E4 q | G4 half 90
+    Same-line chord        C4 E4 G4 q  |  C4 E4 G4 half note 90
+    Rest                   rest quarter | r q
+    Track directive        @track Melody acoustic_grand_piano
+    Alternate directive    #track Bass electric_bass_finger
+    Section header         [Chords electric_piano_1]
+    Comment                # text  (except lines starting #track)
+
+  Multi-track example (independent beat cursors per track):
+
+    @track Chords electric_piano_1
+    C4 E4 G4 q
+    F4 A4 C5 q
+    @track Melody flute
+    G5 e
+    A5 e
+    @track Bass acoustic_bass
+    C2 q
+    C2 q
+
+  Same-line pitches share one start beat and one duration (optional velocity).
+  Without directives, events use one default Melody-style track.
+  Durations: app/core/theory.py (parse_duration).
+  Pitches: sharps/flats (C#4, Bb3, …).
+
+  Timing / expression: Studio sends the shared timing + expression objects
+  for Notes (and Chords/Text). With humanize=false (Studio default), same-beat
+  chord notes export on the same tick. With humanize=true, timing jitter is
+  ±humanize_timing beats (default 0.02 ≈ ±10 ticks at PPQ 480) — pitches stay
+  correct; this is post-pipeline humanize, NOT AI and NOT the notes parser.
+
+
+6.5 SHARED STUDIO FIELDS (ALL MODES)
+------------------------------------
+
+  After composition, all generate modes may send:
+    mix          Mute/solo/vol/pan/instrument/channel
+    timing       PPQ, quantize, swing, humanize (+ amounts)
+    expression   Sustain CC64, modulation CC1, pitch bend (+ advanced)
+
+  Mode-specific primary input:
+    Text     → prompt (+ optional bpm/bars/key/mood/style/tracks)
+    Chords   → progression (+ bars_per_chord, add_* role flags)
+    Notes    → notes[] (tracks come from @track / #track / [Name] lines)
+
+
+================================================================================
+7. CORE DOMAIN MODEL
+================================================================================
+
+7.1 MidiEngine  (app/core/engine.py)
+------------------------------------
+
+  Concept               Description
+  --------------------  -------------------------------------------------------
+  NoteEvent             pitch, start_beat, duration_beats, velocity
+  CCEvent               control, value, time_beat
+  PitchBendEvent        value (0..16383 center 8192), time_beat
+  MidiTrack             name, notes, CC, PB, instrument, channel, mute, solo,
+                        volume, pan
+  MidiEngine            bpm, time_signature, key_signature, ppq, tracks
+
+Export guarantees:
+  * BPM clamped (BPM_MIN..BPM_MAX); non-positive → 120
+  * Time signature validated (numerator 1–16; denominator 1|2|4|8|16|32)
+  * Same-pitch overlaps → legato (off before next on)
+  * Absolute times → delta times; end_of_track padded
+  * validate_smf_file after write
+  * resolve_export_channels on ACTIVE tracks only
+
+Type 0 vs Type 1:
+  * Type 1 (default): track 0 = "Conductor" (tempo / TS / key) + role tracks.
+    Default: score meta on Conductor ONLY (SMF 1.0).
+    Optional: duplicate_score_meta=true copies meta onto each note track.
+  * Type 0: one "Merged" track (all channels / meta together).
+
+
+7.2 MODULES UNDER app/core/
+---------------------------
+
+  Module            Responsibility
+  ----------------  -------------------------------------------------------
+  theory.py         Note names, durations, harmony helpers
+  instruments.py    GM programs, aliases, drum channel 9
+  catalog.py        Moods, styles, BPM hints, prompt matching
+  timing.py         Quantize, swing, humanize, MPC→delay helper,
+                    sustain pair preservation
+  expression.py     Sustain / mod / pitch-bend patterns
+  smf_validate.py   Post-export structural checks
+  engine.py         Score model + SMF build
+
+
+7.3 ROLES, MUTE, SOLO
+---------------------
+
+Canonical roles: melody | chords | bass | drums
+
+Drums: GM channel index 9 (Studio displays as channel 10).
+
+Export rules (matches Ableton-style solo semantics for “what is heard”):
+
+  Situation                              Exported
+  -------------------------------------  ----------------------------------
+  No Solo on any role                    All enabled non-muted roles
+  One or more Solo on                    Only those soloed roles
+  Solo + Mute on same role               Solo wins (still exported)
+  Role pill OFF (Studio)                 Not exported; S/M cleared in UI
+  Mixer Mute on enabled role             Omitted from .mid
+
+Mute/disable = OMIT from file (not a silent empty track). This is intentional
+export-as-heard behavior.
+
+
+================================================================================
+8. SHARED REQUEST OPTIONS
+================================================================================
+
+Defined in app/shared/schemas.py; mirrored in frontend types.
+
+
+8.1 TrackOptions (text mode)
+----------------------------
+
+  { "melody": true, "chords": true, "bass": true, "drums": false }
+
+When provided, at least one role must be true.
+
+
+8.2 Chords role flags
+---------------------
+
+  add_melody | add_chords | add_bass | add_drums   (booleans)
+
+
+8.3 TrackMixOptions
+-------------------
+
+Per role (melody/chords/bass/drums):
+
+  mute_*            bool
+  solo_*            bool
+  volume_*          0–127
+  pan_*             0–127
+  instrument_*      GM slug or null
+  channel_*         0–15 or null (auto); drums forced to 9
+
+
+8.4 TimingOptions
+-----------------
+
+  Field                 Notes
+  --------------------  ----------------------------------------------------
+  quantize              "1/1".."1/32" or null
+  quantize_duration     bool (default true)
+  swing                 DELAY FRACTION 0.0–1.0 — NOT MPC percent
+                        0 = straight; ≈0.33 = triplet feel
+                        Studio: MPC slider 50–75 → delay = (mpc-50)/50
+                        Helper: mpc_swing_to_delay() also accepts 50–100
+  swing_grid            usually "1/8" or "1/16"
+  humanize              bool
+  humanize_timing       beats jitter (default 0.02)
+  humanize_velocity     int jitter
+  humanize_duration     beats jitter
+  humanize_controllers  also jitter CC / pitch-bend times
+  ppq                   24–9600 (default 480)
+  seed                  optional humanize RNG seed
+
+WARNING: POSTing swing: 66 (thinking “MPC 66%”) is incorrect. Convert first.
+
+
+8.5 ExpressionOptions
+---------------------
+
+  sustain | modulation | pitch_bend          toggles (defaults historically on)
+
+Optional fine controls:
+  sustain_on_value / sustain_off_value / sustain_hold_ratio
+  modulation_value / modulation_interval_bars / modulation_accent_ratio
+  pitch_bend_scoop_depth / pitch_bend_interval_bars / pitch_bend_scoop_beats
+
+Sustain pairs remain ordered under timing even when off_value ≠ 0.
+
+
+8.6 Export flags
+----------------
+
+  file_type                0 | 1     (default 1)
+  duplicate_score_meta     bool      (default false)
+                           Type 1 only; true = meta on every note track
+
+
+8.7 Limits
+----------
+
+  Parameter         API / engine              Studio UI
+  ----------------  ------------------------  -------------------
+  BPM               4–300 (≤0 → 120)          same
+  Bars              1–512 (default often 16)  1–128 UI cap
+  Time signature    num 1–16; den power-of-2 as listed above
+
+
+================================================================================
+9. HTTP API REFERENCE
+================================================================================
+
+  Base URL (local)     http://127.0.0.1:8000
+  OpenAPI (Swagger)    /docs
+  ReDoc                /redoc
+  OpenAPI JSON         /openapi.json
+
+
+9.1 Health & meta
+-----------------
+
+  Method  Path                 Description
+  ------  -------------------  ----------------------------------------------
+  GET     /health              Liveness + version + AI config
+                               ?probe=1 also checks local GGUF (slower; Studio uses it)
+  GET     /meta/instruments    GM instruments + aliases
+  GET     /meta/styles         Moods, styles, grids, PPQ, swing_mpc hints
+  GET     /meta/ai             Current local model summary
+
+
+9.2 Generation
+--------------
+
+  Method  Path                      AI   Primary body
+  ------  ------------------------  ---  ------------------------------------
+  POST    /generate/text            Yes  prompt + optional bpm/bars/key/mood/
+                                        style/instrument/tracks/mix/timing/
+                                        expression/file_type/
+                                        duplicate_score_meta/seed/filename
+  POST    /generate/text/preview    Yes  same body → JSON engine meta
+  POST    /parse/text              No   { "prompt": "..." }
+  POST    /generate/chords          No   progression, bpm, bars_per_chord, key,
+                                        role flags, mix/timing/expression/...
+  POST    /generate/notes           No  notes[], bpm, key, instrument,
+                                        mix/timing/expression/...
+
+Successful generate/* (except preview) → audio/midi download
+  Content-Disposition: attachment; filename="..."
+
+
+9.3 Example (notes, Type 1)
+---------------------------
+
+  POST /generate/notes
+  Content-Type: application/json
+
+  {
+    "notes": [
+      "@track Melody acoustic_grand_piano",
+      "C4 quarter",
+      "E4 quarter",
+      "C4 E4 G4 q",
+      "rest q",
+      "G4 half"
+    ],
+    "bpm": 120,
+    "file_type": 1,
+    "duplicate_score_meta": false,
+    "filename": "example.mid",
+    "timing": { "quantize": "1/16", "swing": 0, "ppq": 480 },
+    "expression": { "sustain": true, "modulation": false, "pitch_bend": false }
+  }
+
+
+9.4 Errors
+----------
+
+  Via raise_generate_http / FastAPI:
+    400  validation, empty mix, bad progression / notes
+    422  Pydantic field errors (loc + msg)
+    4xx/5xx AI failures mapped with readable detail
+
+  Studio: formatApiDetail() normalizes detail string | array | object.
+
+
+9.5 CORS
+--------
+
+Always allow localhost:3000 / 3001 (and 127.0.0.1 variants).
+Default origin regex covers private LAN (10.*, 172.16–31.*, 192.168.*).
+Production: set CORS_ORIGINS (comma-separated). Optional CORS_ORIGIN_REGEX
+(empty string disables the default regex).
+
+
+================================================================================
+10. FRONTEND (STUDIO)
+================================================================================
+
+  Path                                  Role
+  ------------------------------------  ---------------------------------------
+  src/app/                              App Router, layout, globals.css
+  src/features/studio/components/       StudioPage.tsx (main UI + mixer)
+  src/features/studio/api/studioApi.ts  Fetch + .mid blob download
+  src/features/studio/types.ts          Options types
+  src/features/studio/constants.ts      Catalogs; bars UI 1–128
+  src/shared/ui/                        Form helpers
+
+User flow:
+  1. Choose mode (text / chords / notes)
+  2. Optional prompt parse (POST /parse/text) auto-fills ONLY detected fields
+  3. Health (?probe=1) + /meta/instruments|/styles drive status + dropdowns
+     (GGUF / AI ready gate applies to Text mode only; Chords+Notes generate
+     without the local model)
+  4. Mixer: role pills, Mute/Solo, instruments, channels, vol/pan
+  5. Swing = MPC 50–75% (converted before POST)
+  6. Generate → download .mid via /generate/text|chords|notes
+
+Studio API usage notes (current UI):
+  * Calls: /generate/text|chords|notes, /parse/text, /health, /meta/instruments,
+    /meta/styles.
+  * Does NOT call POST /generate/text/preview (backend-only) or GET /meta/ai
+    (AI status comes from /health).
+  * UI label "Export preview" is an on-page summary panel, not the preview API.
+  * Sends file_type; does NOT send duplicate_score_meta (API default false =
+    Conductor-only meta on Type 1).
+
+Env: NEXT_PUBLIC_API_URL (must match backend host/port; rebuild for production).
+
+
+================================================================================
+11. AI INTEGRATION
+================================================================================
+
+  Piece            Location
+  ---------------  ------------------------------------------------------------
+  Client           app/features/generation/ai_client.py
+  Config           app/features/generation/config.py
+  Prompts          prompts.py
+  Orchestration    service.py  (generate_from_prompt; generate_from_chords
+                   is exact / no LLM — see chords_to_midi/exact.py)
+  Composer         composer.py  (AI solo/mute flags stripped; host owns mixer)
+                   Used by Text mode only for AI JSON → engine.
+
+  Where the local model is used
+  -----------------------------
+  * Text → MIDI  (POST /generate/text, /generate/text/preview, CLI text)
+  * NOT used for Chords → MIDI (POST /generate/chords / CLI chords) — exact.py
+  * NOT used for Notes → MIDI (POST /generate/notes / CLI notes)
+
+  Runtime (llama-cpp-python + Qwen3 GGUF)
+  ----------------------------------------
+  1. get_ai_config() resolves model path + inference params from .env.
+  2. Lazy Llama(...) load/cache (first call 30–90s typical on CPU).
+  3. compose_midi_json: ChatML prompt + JSON prefill `{\n  "bpm": `,
+     user suffix `/no_think`, free completion (no json_object grammar).
+  4. Temperature: seed set → 0.2; else max(0.2, AI_TEMPERATURE).
+  5. Strip <think>…</think>, repair/normalize JSON →
+     {bpm, key, time_signature, tracks[]}.
+  6. Drop empty-note tracks; require ≥1 playable track.
+  7. Debug dump: backend/generated/_last_model_raw.json.txt
+  8. composer.composition_to_engine → MidiEngine → HTTP post-pipeline.
+
+  Variable               Notes
+  ---------------------  ------------------------------------------------------
+  LOCAL_MODEL_PATH       Optional path to .gguf
+                         (default backend/models/Qwen3-4B-Q4_K_M.gguf)
+  LOCAL_N_CTX            Context window (default 4096)
+  LOCAL_N_THREADS        Optional; default CPU count − 1
+  LOCAL_N_GPU_LAYERS     0 = CPU only
+  AI_TEMPERATURE         Default 0.3; floor 0.2 at inference; seed → 0.2
+  AI_MAX_TOKENS          Default 3072
+
+Moods / styles must match catalog.py (Studio constants stay in sync).
+Default model filename: Qwen3-4B-Q4_K_M.gguf (~2.5 GB).
+
+
+================================================================================
+12. CLI
+================================================================================
+
+  pip install -e .     # from backend/
+  midi-gen text "..." -o samples/out.mid
+  midi-gen chords "C | G | Am | F" --bpm 120 --drums -o samples/chords.mid
+  midi-gen notes examples/notes_example.txt --bpm 100 -o samples/notes.mid
+  midi-gen serve --host 127.0.0.1 --port 8000
+
+CLI = composition → engine.export ONLY.
+It does NOT run mix / expression / timing post-pipeline.
+Use Studio or REST for those controls.
+
+
+================================================================================
+13. CONFIGURATION REFERENCE
+================================================================================
+
+13.1 backend/.env
+-----------------
+
+  Variable             Required   Notes
+  -------------------  ---------  ---------------------------------------------
+  LOCAL_MODEL_PATH     No         Override path to Qwen GGUF
+                                  (default models/Qwen3-4B-Q4_K_M.gguf)
+  LOCAL_N_CTX          No         4096
+  LOCAL_N_THREADS      No         Default CPU count − 1
+  LOCAL_N_GPU_LAYERS   No         0 = CPU
+  AI_TEMPERATURE       No         0.3 (inference floor 0.2; seed → 0.2)
+  AI_MAX_TOKENS        No         3072
+  HOST                 No         127.0.0.1; use 0.0.0.0 when exposing
+  PORT                 No         8000 (fail if busy unless PORT_FALLBACK=1)
+  PORT_FALLBACK        No         0 = exit when PORT busy; 1 = next free port
+  CORS_ORIGINS         Deploy     Extra origins, comma-separated
+  CORS_ORIGIN_REGEX    Optional   Empty disables default LAN regex
+  UVICORN_RELOAD       Dev        1 = auto-reload
+
+See backend/.env.example.
+
+
+13.2 frontend/.env.local
+------------------------
+
+  NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+
+Keep in sync if the backend prints a different port.
+
+
+================================================================================
+14. LOCAL DEVELOPMENT
+================================================================================
+
+Backend:
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  cd backend
+  copy .env.example .env
+  pip install -r requirements.txt
+  pip install -e .
+  python run.py
+
+Frontend:
+  cd frontend
+  copy .env.example .env.local
+  npm install
+  npm run dev
+  → http://localhost:3000
+
+Samples:
+  cd backend
+  python examples/generate_samples.py
+
+Tests:
+  cd backend
+  pytest
+
+Windows shortcuts (repo root): start-backend.bat | start-frontend.bat
+
+
+================================================================================
+15. TESTING
+================================================================================
+
+  Suite                       Focus
+  --------------------------  -------------------------------------------------
+  test_smf_compliance.py      Type 0/1, overlaps, conductor meta duplex flag
+  test_bugfixes_export.py     Solo, swing MPC, sustain pairs, active channels
+  test_medium_bugfixes.py     Schema / composer edge cases
+  test_chords_notes.py        Chord + notes pipelines
+  test_ui_to_midi.py          Studio-shaped payload → .mid
+  test_ui_payload_wiring.py   UI field wiring through POST / generate
+
+Add tests when changing export order, mixer rules, swing, expression/timing,
+or SMF validation.
+
+
+================================================================================
+16. DEPLOYMENT CHECKLIST
+================================================================================
+
+  1. Place Qwen3-4B-Q4_K_M.gguf in backend/models/
+  2. HOST=0.0.0.0 + public PORT (+ TLS reverse proxy as needed)
+  3. CORS_ORIGINS=https://your-frontend-domain
+  4. Frontend NEXT_PUBLIC_API_URL=https://your-api-domain → build & start
+  5. GET /health and GET /health?probe=1
+  6. Smoke-test text, chords, notes generate
+
+Notes:
+  * No built-in auth — private network / gateway if public
+  * Pin PORT in production (do not rely on local port fallback)
+  * Restart API after deploys unless UVICORN_RELOAD=1
+
+
+================================================================================
+17. SECURITY
+================================================================================
+
+  Topic           Posture
+  --------------  -------------------------------------------------------------
+  Secrets         .env local; .env.example placeholders only
+  AuthN/Z         None on generate endpoints
+  CORS            Explicit + optional regex; tighten for production
+  Filenames       safe_filename before Content-Disposition
+  LLM input       Untrusted; constrained by schemas / catalogs
+  Dependencies    Range pins in requirements.txt / pyproject.toml
+
+
+================================================================================
+18. EXTENSION GUIDE
+================================================================================
+
+New generate mode:
+  1. app/features/<mode>/ schemas + router (+ inputs)
+  2. Build MidiEngine
+  3. Call helpers in §6.1 order (skip selection if N/A)
+  4. Register in main.py
+  5. Mirror Studio types + API
+  6. Add pytest happy + failure paths
+
+Instrument alias → app/core/instruments.py (+ /meta/instruments).
+
+Expression defaults → ExpressionOptions + expression.py together; keep
+routers expression-before-timing.
+
+LLM (text only): local GGUF via ai_client.py; keep composition JSON contract.
+Chords: extend CHORD_QUALITY / exact.py together with tests.
+Notes: extend notes_to_midi/inputs.py grammar + tests.
+
+
+================================================================================
+19. TROUBLESHOOTING
+================================================================================
+
+  Symptom                         Cause                         Fix
+  ------------------------------  ----------------------------  -------------------
+  Studio API down                 Backend off / wrong URL       Match printed URL
+  CORS error                      Origin not allowed            CORS_ORIGINS
+  Text AI error                   Missing local GGUF model          /health?probe=1
+  All tracks muted or empty       Mix/solo wiped notes          Enable / clear solos
+  Only 1 of 4 tracks exported     Solo on one role              Clear / multi-solo
+  Notes: no playable notes        Only rests/comments           Add C4 q lines
+  Invalid progression             Bad chord tokens              C, Am, F#m, E7b9…
+  Notes: chord note order / ticks   Same-beat list order or      Same pitches = OK;
+                                    humanize (±0.02 beats)       humanize off to verify
+  Notes: micro timing offsets       Humanize on                  Expected; not AI / not parser
+  Chords “wrong” vs AI memory     Old builds used LLM chords    Restart API; exact mode
+  Wrong swing via raw API         Sent MPC % as swing           Use (mpc-50)/50
+  New fields missing in API       Stale uvicorn process         Restart run.py
+  Port changed                    8000 busy                     Update FE env
+
+
+================================================================================
+20. DESIGN DECISIONS
+================================================================================
+
+  1. LLM (text) out / engine in — chords & notes stay deterministic.
+  2. Shared HTTP post-pipeline — one export path for REST modes.
+  3. Expression before timing — automation gets quantize/swing/humanize.
+  4. Conductor-only meta by default — SMF 1.0; duplex optional.
+  5. Notes without AI — exact, offline, reproducible.
+  6. Chords without AI — exact symbol voicings (exact.py).
+  7. Validate after write — catch bad files before DAW import.
+  8. Parse "detected" map — Studio fills only mentioned prompt fields.
+  9. Mute/Solo omit from file — clean export-as-heard SMF.
+ 10. Active-only channel resolve — muted lanes do not steal channels.
+ 11. Type 1 default — multi-track DAW editing; Type 0 for interchange.
+
+
+================================================================================
+21. KNOWN LIMITATIONS
+================================================================================
+
+Documented intentionally (not silent bugs):
+
+  * CLI skips mix / expression / timing pipeline (§12).
+  * Raw API: disabling a role only sets muted; Solo can resurrect it if both
+    are sent. Studio guards this — prefer Studio for mixer safety.
+  * Text AI length / content may undershoot or vary by seed/model; output
+    remains valid SMF. Chords/Notes are exact (not subject to this).
+  * TimingOptions.swing is delay fraction; API callers must convert MPC %.
+  * Studio bars capped at 128; API allows up to 512.
+  * Studio does not send duplicate_score_meta (API default false).
+  * Studio does not call /generate/text/preview or /meta/ai (REST still can).
+  * No authentication on generate endpoints.
+  * Text mode is creative AI — it does not hard-lock every requested bar
+    or phrase the way Notes/Chords do.
+  * Humanize / swing / quantize run AFTER the exact Notes/Chords builder.
+    Event-level tick order inside a same-beat chord may shuffle under
+    humanize; pitch set and nominal durations remain correct. Use
+    humanize=false for same-tick chord stacks. Default humanize_timing is
+    0.02 beats (~±10 ticks at PPQ 480), not “1–3 ticks”.
+
+
+================================================================================
+22. GLOSSARY
+================================================================================
+
+  Term                    Meaning
+  ----------------------  -----------------------------------------------------
+  SMF                     Standard MIDI File (.mid)
+  PPQ                     Pulses per quarter note (ticks_per_beat)
+  GM                      General MIDI programs / drum map
+  Type 0 / Type 1         Single-track vs multi-track SMF
+  Conductor               Type 1 track 0 — tempo / time / key map
+  Role                    melody | chords | bass | drums
+  Composition JSON        LLM schema → composer.py (text mode)
+  Exact chords            parse_chord_symbol + exact.py → MidiEngine
+  Humanize                Controlled timing/velocity/duration jitter
+  Swing (API)             Off-beat delay fraction 0–1 (≈0.33 triplet)
+  Swing (Studio MPC %)    50 straight, ≈66 triplet; converted before POST
+  Solo                    Export only soloed roles (multi-solo OK)
+  Mute                    Omit role from .mid (not a silent track)
+  duplicate_score_meta    Opt-in Type 1 meta on every note track
+
+
+================================================================================
+23. RELATED DOCUMENTS
+================================================================================
+
+  Document                    Contents
+  --------------------------  -------------------------------------------------
+  DOCUMENTATION.txt           This file (authoritative)
+  README.md                   Product overview + quick start
+  backend/README.md           Backend setup, API notes, CLI
+  frontend/README.md          Studio setup, mixer, MPC swing
+  backend/.env.example        Backend env template
+  frontend/.env.example       Frontend env template
+  /docs (running API)         Live OpenAPI / try-it-out
+
+
+================================================================================
+24. REVISION HISTORY
+================================================================================
+
+  Date         Notes
+  -----------  ----------------------------------------------------------------
+  2026-08-05   Docs audit: keep docs = code only. Fixed humanize tick claim
+               (±0.02 beats ≈ ±10 @ PPQ 480), README notes pipeline skip
+               select, chord qualities ↔ theory.py, Studio path layout.
+  2026-08-05   Docs: Notes multi-track exactness, shared timing/expression,
+               humanize tick-offset caveat (not AI). READMEs synced.
+  2026-08-05   Exact chords mode (no LLM): chords_to_midi/exact.py; Notes
+               same-line chords (C4 E4 G4 q); V1–V3 chord qualities + slash;
+               AI = text only. Docs/READMEs synced.
+  2026-08-05   Earlier: local Qwen GGUF AI flow (temp 0.2 when seeded),
+               Studio vs REST API deltas, layout (models/generated).
+  2026-08-04   Full rewrite for accuracy: post-pipeline order (expression
+               before timing), MPC swing, conductor-only meta +
+               duplicate_score_meta, active-channel resolve, mute/solo omit,
+               CLI vs HTTP, known limitations, TOC.
+
+
+================================================================================
+END OF DOCUMENT
+
+MIDIgen engineering reference — keep behavioral code and this file in lockstep.
+
+================================================================================
