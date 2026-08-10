@@ -30,6 +30,37 @@ export const BARS_MAX = 128;
 export const BARS_MAX_API = 512;
 export const BARS_DEFAULT = 16;
 
+/** Default download names — mode prefix so Text / Chords / Notes are obvious. */
+export const DEFAULT_FILENAME_BY_MODE = {
+  text: "text_output.mid",
+  chords: "chords_output.mid",
+  notes: "notes_output.mid",
+} as const;
+
+/** Stock / preset names that may auto-update when the mode tab changes. */
+export const STOCK_FILENAMES = new Set<string>([
+  ...Object.values(DEFAULT_FILENAME_BY_MODE),
+  // Older defaults / presets (still treated as non-custom)
+  "generated.mid",
+  "uplifting_piano.mid",
+  "chords.mid",
+  "notes.mid",
+  "progression.mid",
+  "note_list.mid",
+  "happy_piano.mid",
+  "sad_violin.mid",
+  "text_happy_piano.mid",
+  "text_sad_violin.mid",
+  "chords_progression.mid",
+  "notes_list.mid",
+]);
+
+export function defaultFilenameForMode(
+  mode: keyof typeof DEFAULT_FILENAME_BY_MODE,
+): string {
+  return DEFAULT_FILENAME_BY_MODE[mode];
+}
+
 /** Must match backend `app.core.catalog.MOODS` / `STYLES`. */
 export const MOODS = [
   "Happy",
@@ -108,6 +139,19 @@ export const DEFAULT_INSTRUMENTS = [
 
 export function labelize(id: string) {
   return id.replaceAll("_", " ");
+}
+
+/** Align with backend ``is_drum_instrument`` — melodic roles must not pick these. */
+export function isDrumInstrument(id: string): boolean {
+  const lower = id.trim().toLowerCase();
+  const spaced = lower.replaceAll("_", " ").replaceAll("-", " ");
+  return (
+    spaced === "drums" ||
+    spaced === "drum" ||
+    spaced === "drum kit" ||
+    lower === "drum_kit" ||
+    lower === "drums"
+  );
 }
 
 /**
@@ -208,9 +252,12 @@ export function normalizeStyle(value: string): Style {
     "lo fi": "Lo-Fi",
     hiphop: "Hip Hop",
     "hip hop": "Hip Hop",
+    "hip-hop": "Hip Hop",
     rnb: "R&B",
     "r and b": "R&B",
     "r & b": "R&B",
+    "synth wave": "Synthwave",
+    synthwave: "Synthwave",
   };
   if (aliases[key] || aliases[raw]) {
     return aliases[key] || aliases[raw];

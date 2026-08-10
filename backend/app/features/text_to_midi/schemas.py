@@ -18,6 +18,7 @@ from app.shared.schemas import (
     TimingOptions,
     TrackMixOptions,
     TrackOptions,
+    coerce_http_bpm,
 )
 
 
@@ -28,6 +29,11 @@ class TextGenerateRequest(BaseModel):
         examples=["Generate a 16-bar uplifting piano melody in C Major at 128 BPM."],
     )
     bpm: float | None = Field(default=None, ge=BPM_MIN, le=BPM_MAX)
+    client_request_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional id so /generate/cancel can abort this request only",
+    )
     bars: int | None = Field(
         default=None,
         ge=BARS_MIN,
@@ -58,7 +64,7 @@ class TextGenerateRequest(BaseModel):
         ),
     )
     seed: int | None = 42
-    filename: str = "generated.mid"
+    filename: str = "text_output.mid"
 
     @field_validator("prompt", mode="before")
     @classmethod
@@ -69,6 +75,19 @@ class TextGenerateRequest(BaseModel):
         if not cleaned:
             raise ValueError("prompt must not be empty")
         return cleaned
+
+    @field_validator("bpm", mode="before")
+    @classmethod
+    def _coerce_bpm(cls, value: object) -> object:
+        return coerce_http_bpm(value)
+
+    @field_validator("client_request_id", mode="before")
+    @classmethod
+    def _normalize_client_request_id(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
     @field_validator("mood")
     @classmethod

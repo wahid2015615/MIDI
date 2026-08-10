@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
+from app.core.engine import require_finite_beat
+
 NOTE_TO_SEMITONE = {
     "C": 0,
     "C#": 1,
@@ -192,9 +196,12 @@ def parse_duration(token: str) -> float:
     if token in DURATION_BEATS:
         return DURATION_BEATS[token]
     try:
-        return float(token)
+        value = float(token)
     except ValueError as exc:
         raise ValueError(f"Unknown duration '{token}'") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"Duration must be finite, got '{token}'")
+    return require_finite_beat(value, name="duration", allow_zero=False)
 
 
 def key_root_midi(key: str, octave: int = 4) -> int:

@@ -7,7 +7,7 @@
   Version          : 0.1.0
   Status           : Authoritative engineering reference
   Audience         : Backend / frontend engineers, QA, API integrators
-  Last updated     : 2026-08-05 (docs synced to code only; humanize ticks fixed)
+  Last updated     : 2026-08-07 (final bugfix: finite beats, cancel ids, notes, BPM)
   Format           : Plain text
   Companion guides : README.md | backend/README.md | frontend/README.md
   Live schemas     : http://127.0.0.1:8000/docs  (when API is running)
@@ -97,7 +97,7 @@ NON-GOALS
 ================================================================================
 
   +-----------------------------------------------------------------+
-  |                  Next.js Studio (frontend :3000)                 |
+  |                  Next.js Studio (frontend :3001)                 |
   |    modes · mixer · timing · expression · download .mid          |
   +------------------------------+----------------------------------+
                                  | HTTP JSON
@@ -217,16 +217,26 @@ Used by POST /generate/text, /generate/text/preview, /generate/chords,
   ----  -------------------------  ------------------------------------------------------
    1    apply_score_meta           Time signature + key signature on engine
    2    apply_track_mix            Mute/solo/vol/pan/instrument/channel
-   3    apply_track_selection      Mute roles the client disabled
-                                   (text + chords only; notes has no role pills)
+                                   Custom Notes labels (e.g. Violin) follow
+                                   Melody mute/solo/vol/pan; keep @track
+                                   instrument/channel. Melodic roles cannot
+                                   use drum kit / drum channel 9.
+   3    apply_track_selection      Disable roles the client turned off:
+                                   muted=True AND solo=False (cannot resurrect).
+                                   Non-mixer-role tracks muted when any
+                                   include_* is set (text + chords only;
+                                   notes has no role pills — skips this step)
    4    apply_expression_options   CC64 / CC1 / pitch bend on active tracks
+                                   (null/omitted expression = no-op)
    5    apply_timing               Quantize, swing, humanize, PPQ
    6    ensure_exportable          Fail if nothing audible remains
-   7    send_midi / engine_meta    Export+validate file OR preview JSON
+   7    send_midi / engine_meta    Export+validate file OR preview JSON;
+                                   archive copy under backend/generated/
 
 Response download headers (generate file endpoints):
 
-  X-MIDI-BPM | X-MIDI-Bars | X-MIDI-Tracks | X-MIDI-PPQ | X-MIDI-Key | X-MIDI-TimeSig
+  X-MIDI-BPM | X-MIDI-Bars | X-MIDI-Tracks | X-MIDI-PPQ | X-MIDI-Key |
+  X-MIDI-TimeSig | X-MIDI-Saved-As (archived filename under generated/)
 
 
 6.2 TEXT → MIDI
@@ -245,9 +255,16 @@ Response download headers (generate file endpoints):
     POST /generate/text/preview   → JSON metadata only (same pipeline)
     POST /parse/text              → parse only; returns fields + "detected" map
 
-  Seed: request seed for AI / humanize reproducibility. When seed is set,
-  AI sampling temperature is forced to 0.2; otherwise
-  max(0.2, AI_TEMPERATURE).
+  Seed: request seed (API / Studio default 42) for LLM sampling reproducibility
+  (when llama.cpp honors seed) and for humanize RNG (unless timing.seed is set).
+  AI sampling temperature = max(0.0, AI_TEMPERATURE). Seed does NOT force 0.2.
+
+  Cancel: Studio / clients may POST /generate/cancel to abort in-flight
+  local GGUF compose at the next safe checkpoint (HTTP 499 on the generate
+  request). Optional body ``{"client_request_id": "..."}`` cancels only that
+  request (Studio sends the same id on /generate/text). Omit the id to cancel
+  all registered generates. Cancel is observed before/after llama.cpp
+  ``create_completion`` (mid-inference CPU work may finish before 499).
 
 
 6.3 CHORDS → MIDI
@@ -268,6 +285,8 @@ Response download headers (generate file endpoints):
     - dash/arrow   C - G - Am - F   /   C -> G   /   C → G
     , comma        C, G, Am, F
     whitespace     C G Am F   or one chord per line
+  Mixed separators after a primary ``|`` (or ``->``) split are also expanded
+  (e.g. ``C | G - Am | F`` → C, G, Am, F).
 
   Chord qualities (authoritative table: app/core/theory.py CHORD_QUALITY):
     V1  maj, m/min, maj7, m7/min7, 7, sus2, sus4, dim  (+ aug)
@@ -412,8 +431,11 @@ Export rules (matches Ableton-style solo semantics for “what is heard”):
   Role pill OFF (Studio)                 Not exported; S/M cleared in UI
   Mixer Mute on enabled role             Omitted from .mid
 
-Mute/disable = OMIT from file (not a silent empty track). This is intentional
-export-as-heard behavior.
+  Mute/disable = OMIT from file (not a silent empty track). This is intentional
+  export-as-heard behavior.
+
+  When apply_track_selection disables a role (include_*=false), solo is cleared
+  so Solo cannot resurrect a disabled role.
 
 
 ================================================================================
@@ -428,7 +450,12 @@ Defined in app/shared/schemas.py; mirrored in frontend types.
 
   { "melody": true, "chords": true, "bass": true, "drums": false }
 
-When provided, at least one role must be true.
+When the ``tracks`` object is present, omitted role keys default to **false**
+(not schema class defaults), so ``{"melody": true}`` enables melody only.
+At least one role must be true.
+
+Default when ``tracks`` is omitted entirely: melody+chords+bass on (prompt /
+service defaults).
 
 
 8.2 Chords role flags
@@ -442,10 +469,10 @@ When provided, at least one role must be true.
 
 Per role (melody/chords/bass/drums):
 
-  mute_*            bool
-  solo_*            bool
-  volume_*          0–127
-  pan_*             0–127
+  mute_*            bool (default false)
+  solo_*            bool (default false)
+  volume_*          0–127 (melody/bass/drums default 100; chords 90)
+  pan_*             0–127 (default 64)
   instrument_*      GM slug or null
   channel_*         0–15 or null (auto); drums forced to 9
 
@@ -455,20 +482,23 @@ Per role (melody/chords/bass/drums):
 
   Field                 Notes
   --------------------  ----------------------------------------------------
-  quantize              "1/1".."1/32" or null
+  quantize              "1/1".."1/32" or null (API default null = no snap;
+                        Studio default "1/16")
   quantize_duration     bool (default true)
   swing                 DELAY FRACTION 0.0–1.0 — NOT MPC percent
                         0 = straight; ≈0.33 = triplet feel
                         Studio: MPC slider 50–75 → delay = (mpc-50)/50
                         Helper: mpc_swing_to_delay() also accepts 50–100
-  swing_grid            usually "1/8" or "1/16"
-  humanize              bool
+  swing_grid            usually "1/8" or "1/16" (default "1/8")
+  humanize              bool (default false; Studio default off)
   humanize_timing       beats jitter (default 0.02)
-  humanize_velocity     int jitter
-  humanize_duration     beats jitter
-  humanize_controllers  also jitter CC / pitch-bend times
+  humanize_velocity     int jitter (default 8)
+  humanize_duration     beats jitter (default 0.01)
+  humanize_controllers  also jitter CC / pitch-bend times (default false)
   ppq                   24–9600 (default 480)
-  seed                  optional humanize RNG seed
+  seed                  optional humanize RNG seed (falls back to request seed)
+
+Request-level seed (text/chords/notes schemas): default 42 (not timing.seed).
 
 WARNING: POSTing swing: 66 (thinking “MPC 66%”) is incorrect. Convert first.
 
@@ -476,12 +506,18 @@ WARNING: POSTing swing: 66 (thinking “MPC 66%”) is incorrect. Convert first.
 8.5 ExpressionOptions
 ---------------------
 
-  sustain | modulation | pitch_bend          toggles (defaults historically on)
+  sustain | modulation | pitch_bend — defaults True when an ExpressionOptions
+  object is present. Omitted / null expression = no-op (no CC/PB written).
+  Studio always sends the expression object.
 
-Optional fine controls:
-  sustain_on_value / sustain_off_value / sustain_hold_ratio
-  modulation_value / modulation_interval_bars / modulation_accent_ratio
-  pitch_bend_scoop_depth / pitch_bend_interval_bars / pitch_bend_scoop_beats
+Optional fine controls (schema defaults):
+  sustain_on_value 127 / sustain_off_value 0 / sustain_hold_ratio 0.92
+  modulation_value 24 / modulation_interval_bars 2.0 / modulation_accent_ratio 0.5
+  pitch_bend_scoop_depth 400 / pitch_bend_interval_bars 4.0 /
+  pitch_bend_scoop_beats 0.25
+
+When sustain is enabled, sustain_on_value and sustain_off_value must differ
+so pedal pairs stay ordered under quantize/humanize.
 
 Sustain pairs remain ordered under timing even when off_value ≠ 0.
 
@@ -499,9 +535,12 @@ Sustain pairs remain ordered under timing even when off_value ≠ 0.
 
   Parameter         API / engine              Studio UI
   ----------------  ------------------------  -------------------
-  BPM               4–300 (≤0 → 120)          same
+  BPM               4–300; HTTP ≤0 → 120      same (cleared → 120)
   Bars              1–512 (default often 16)  1–128 UI cap
+  bars_per_chord    0.0625–16; total ≤512     same preflight checks
   Time signature    num 1–16; den power-of-2 as listed above
+  Beat times        finite; ≤ BEAT_TIME_MAX   Notes rejects Inf/huge
+                    (512×16 beats)
 
 
 ================================================================================
@@ -519,8 +558,11 @@ Sustain pairs remain ordered under timing even when off_value ≠ 0.
 
   Method  Path                 Description
   ------  -------------------  ----------------------------------------------
-  GET     /health              Liveness + version + AI config
-                               ?probe=1 also checks local GGUF (slower; Studio uses it)
+  GET     /health              Liveness + version + AI status
+                               Fields include ai.configured | online | loaded
+                               + temperature / n_ctx / threads / gpu layers
+                               ?probe=1 also loads/checks local GGUF (slower;
+                               Studio uses probe=1)
   GET     /meta/instruments    GM instruments + aliases
   GET     /meta/styles         Moods, styles, grids, PPQ, swing_mpc hints
   GET     /meta/ai             Current local model summary
@@ -534,16 +576,23 @@ Sustain pairs remain ordered under timing even when off_value ≠ 0.
   POST    /generate/text            Yes  prompt + optional bpm/bars/key/mood/
                                         style/instrument/tracks/mix/timing/
                                         expression/file_type/
-                                        duplicate_score_meta/seed/filename
+                                        duplicate_score_meta/seed/filename/
+                                        client_request_id
   POST    /generate/text/preview    Yes  same body → JSON engine meta
-  POST    /parse/text              No   { "prompt": "..." }
+  POST    /generate/cancel          —   Optional {"client_request_id"} scopes
+                                        cancel; omit → cancel all registered.
+                                        Checkpoint abort → {"cancelled": true}
+  POST    /parse/text              No   { "prompt": "..." } (max 8000 chars)
   POST    /generate/chords          No   progression, bpm, bars_per_chord, key,
                                         role flags, mix/timing/expression/...
+                                        (len(chords)×bars_per_chord ≤ 512)
   POST    /generate/notes           No  notes[], bpm, key, instrument,
                                         mix/timing/expression/...
 
-Successful generate/* (except preview) → audio/midi download
-  Content-Disposition: attachment; filename="..."
+Successful generate/* (except preview/cancel) → audio/midi download
+  Content-Disposition: attachment; filename="..." (and/or filename*=UTF-8'')
+  Optional header X-MIDI-Saved-As = archived name under backend/generated/
+  Archive retains newest GENERATED_ARCHIVE_MAX files (default 200).
 
 
 9.3 Example (notes, Type 1)
@@ -576,7 +625,9 @@ Successful generate/* (except preview) → audio/midi download
   Via raise_generate_http / FastAPI:
     400  validation, empty mix, bad progression / notes
     422  Pydantic field errors (loc + msg)
-    4xx/5xx AI failures mapped with readable detail
+    499  Generation cancelled (after POST /generate/cancel)
+    503  Other AIMusicError (e.g. missing model during text compose)
+    4xx/5xx other failures mapped with readable detail
 
   Studio: formatApiDetail() normalizes detail string | array | object.
 
@@ -612,10 +663,17 @@ User flow:
   4. Mixer: role pills, Mute/Solo, instruments, channels, vol/pan
   5. Swing = MPC 50–75% (converted before POST)
   6. Generate → download .mid via /generate/text|chords|notes
+  7. Cancel (Text) → POST /generate/cancel then AbortController abort
+
+Studio defaults (current UI):
+  * Port: http://localhost:3001 (package.json -p 3001)
+  * Quantize grid: "1/16"; humanize off; seed 42
+  * resolveApiBase(): if page host is LAN and NEXT_PUBLIC_API_URL still
+    points at 127.0.0.1, rewrite API host to the page hostname
 
 Studio API usage notes (current UI):
-  * Calls: /generate/text|chords|notes, /parse/text, /health, /meta/instruments,
-    /meta/styles.
+  * Calls: /generate/text|chords|notes, /generate/cancel, /parse/text,
+    /health, /meta/instruments, /meta/styles.
   * Does NOT call POST /generate/text/preview (backend-only) or GET /meta/ai
     (AI status comes from /health).
   * UI label "Export preview" is an on-page summary panel, not the preview API.
@@ -651,22 +709,28 @@ Env: NEXT_PUBLIC_API_URL (must match backend host/port; rebuild for production).
   2. Lazy Llama(...) load/cache (first call 30–90s typical on CPU).
   3. compose_midi_json: ChatML prompt + JSON prefill `{\n  "bpm": `,
      user suffix `/no_think`, free completion (no json_object grammar).
-  4. Temperature: seed set → 0.2; else max(0.2, AI_TEMPERATURE).
-  5. Strip <think>…</think>, repair/normalize JSON →
+  4. Temperature: max(0.0, AI_TEMPERATURE). Seed passed to create() when
+     supported (request seed default 42). Seed does not force 0.2.
+  5. Cancel checkpoints honor POST /generate/cancel (Generation cancelled).
+  6. Strip <think>…</think>, repair/normalize JSON →
      {bpm, key, time_signature, tracks[]}.
-  6. Drop empty-note tracks; require ≥1 playable track.
-  7. Debug dump: backend/generated/_last_model_raw.json.txt
-  8. composer.composition_to_engine → MidiEngine → HTTP post-pipeline.
+  7. Drop empty-note tracks; require ≥1 playable track.
+  8. Debug dump: backend/generated/_last_model_raw.json.txt
+  9. composer.composition_to_engine → MidiEngine → HTTP post-pipeline.
+ 10. After compose, schedule idle unload (MODEL_IDLE_UNLOAD_SECONDS,
+     default 120; minimum 5) so RAM is freed when idle.
 
-  Variable               Notes
-  ---------------------  ------------------------------------------------------
-  LOCAL_MODEL_PATH       Optional path to .gguf
-                         (default backend/models/Qwen3-4B-Q4_K_M.gguf)
-  LOCAL_N_CTX            Context window (default 4096)
-  LOCAL_N_THREADS        Optional; default CPU count − 1
-  LOCAL_N_GPU_LAYERS     0 = CPU only
-  AI_TEMPERATURE         Default 0.3; floor 0.2 at inference; seed → 0.2
-  AI_MAX_TOKENS          Default 3072
+  Variable                   Notes
+  -------------------------  --------------------------------------------------
+  LOCAL_MODEL_PATH           Optional path to .gguf
+                             (default backend/models/Qwen3-4B-Q4_K_M.gguf)
+  LOCAL_N_CTX                Context window (default 4096)
+  LOCAL_N_THREADS            Optional; default CPU count − 1
+  LOCAL_N_GPU_LAYERS         0 = CPU only
+  AI_TEMPERATURE             Default 0.3; no seed override; clamped ≥ 0.0
+  AI_MAX_TOKENS              Default 3072
+  MODEL_IDLE_UNLOAD_SECONDS  Idle seconds before unloading GGUF (default 120;
+                             minimum 5)
 
 Moods / styles must match catalog.py (Studio constants stay in sync).
 Default model filename: Qwen3-4B-Q4_K_M.gguf (~2.5 GB).
@@ -686,6 +750,9 @@ CLI = composition → engine.export ONLY.
 It does NOT run mix / expression / timing post-pipeline.
 Use Studio or REST for those controls.
 
+Note: midi-gen serve always uses uvicorn reload=True. Prefer python run.py
+when you need UVICORN_RELOAD from backend/.env.
+
 
 ================================================================================
 13. CONFIGURATION REFERENCE
@@ -694,21 +761,24 @@ Use Studio or REST for those controls.
 13.1 backend/.env
 -----------------
 
-  Variable             Required   Notes
-  -------------------  ---------  ---------------------------------------------
-  LOCAL_MODEL_PATH     No         Override path to Qwen GGUF
-                                  (default models/Qwen3-4B-Q4_K_M.gguf)
-  LOCAL_N_CTX          No         4096
-  LOCAL_N_THREADS      No         Default CPU count − 1
-  LOCAL_N_GPU_LAYERS   No         0 = CPU
-  AI_TEMPERATURE       No         0.3 (inference floor 0.2; seed → 0.2)
-  AI_MAX_TOKENS        No         3072
-  HOST                 No         127.0.0.1; use 0.0.0.0 when exposing
-  PORT                 No         8000 (fail if busy unless PORT_FALLBACK=1)
-  PORT_FALLBACK        No         0 = exit when PORT busy; 1 = next free port
-  CORS_ORIGINS         Deploy     Extra origins, comma-separated
-  CORS_ORIGIN_REGEX    Optional   Empty disables default LAN regex
-  UVICORN_RELOAD       Dev        1 = auto-reload
+  Variable                  Required   Notes
+  ------------------------  ---------  ----------------------------------------
+  LOCAL_MODEL_PATH          No         Override path to Qwen GGUF
+                                       (default models/Qwen3-4B-Q4_K_M.gguf)
+  LOCAL_N_CTX               No         4096
+  LOCAL_N_THREADS           No         Default CPU count − 1
+  LOCAL_N_GPU_LAYERS        No         0 = CPU
+  AI_TEMPERATURE            No         0.3 (no seed override; clamped ≥ 0.0)
+  AI_MAX_TOKENS             No         3072
+  MODEL_IDLE_UNLOAD_SECONDS No         Seconds after last use before unloading
+                                       GGUF (default 120; minimum 5)
+  HOST                      No         127.0.0.1; use 0.0.0.0 when exposing
+  PORT                      No         8000 (fail if busy unless PORT_FALLBACK=1)
+  PORT_FALLBACK             No         0 = exit when PORT busy; 1 = next free port
+  CORS_ORIGINS              Deploy     Extra origins, comma-separated
+  CORS_ORIGIN_REGEX         Optional   Empty disables default LAN regex
+  UVICORN_RELOAD            Dev        unset/0 = off in run.py; .env.example
+                                       sets 1 for local copies
 
 See backend/.env.example.
 
@@ -719,6 +789,7 @@ See backend/.env.example.
   NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 
 Keep in sync if the backend prints a different port.
+Studio on :3001; resolveApiBase may rewrite 127.0.0.1 when opened via LAN.
 
 
 ================================================================================
@@ -739,7 +810,7 @@ Frontend:
   copy .env.example .env.local
   npm install
   npm run dev
-  → http://localhost:3000
+  → http://localhost:3001
 
 Samples:
   cd backend
@@ -764,6 +835,11 @@ Windows shortcuts (repo root): start-backend.bat | start-frontend.bat
   test_chords_notes.py        Chord + notes pipelines
   test_ui_to_midi.py          Studio-shaped payload → .mid
   test_ui_payload_wiring.py   UI field wiring through POST / generate
+  test_bugfix_batch.py       Selection clears solo; expression null no-op;
+                              empty timing; chords bar cap; custom track mix
+  test_model_idle_unload.py   Idle unload default/env; timer / in-flight
+  test_high_priority_fixes.py Parse detection; chord symbols; drum-kit on
+                              melody rejected; compose lock
 
 Add tests when changing export order, mixer rules, swing, expression/timing,
 or SMF validation.
@@ -868,8 +944,11 @@ Notes: extend notes_to_midi/inputs.py grammar + tests.
 Documented intentionally (not silent bugs):
 
   * CLI skips mix / expression / timing pipeline (§12).
-  * Raw API: disabling a role only sets muted; Solo can resurrect it if both
-    are sent. Studio guards this — prefer Studio for mixer safety.
+  * Omitted expression/timing on raw REST = no expression/timing applied
+    (Studio always sends both).
+  * Request seed defaults to 42 unless the client sends null; text mode
+    is therefore often seeded for reproducibility.
+  * Disabled roles via apply_track_selection clear Solo (cannot resurrect).
   * Text AI length / content may undershoot or vary by seed/model; output
     remains valid SMF. Chords/Notes are exact (not subject to this).
   * TimingOptions.swing is delay fraction; API callers must convert MPC %.
@@ -929,6 +1008,16 @@ Documented intentionally (not silent bugs):
 
   Date         Notes
   -----------  ----------------------------------------------------------------
+  2026-08-07   Final bugfix batch: finite beat caps; Notes multi-word
+               @track + instrument re-validate; partial TrackOptions;
+               BPM ≤0→120 on HTTP; cancel scoped by client_request_id;
+               expression sustain on≠off; archive rotation; Studio
+               filename*/Melody mixer/cancel-on-unmount/chords preflight.
+  2026-08-07   Sync docs to code: POST /generate/cancel + HTTP 499;
+               MODEL_IDLE_UNLOAD_SECONDS (default 120); AI_TEMPERATURE
+               no longer seed-forced 0.2; Studio port :3001; selection
+               clears Solo on disabled roles; X-MIDI-Saved-As;
+               test suites + LAN resolveApiBase. READMEs synced.
   2026-08-05   Docs audit: keep docs = code only. Fixed humanize tick claim
                (±0.02 beats ≈ ±10 @ PPQ 480), README notes pipeline skip
                select, chord qualities ↔ theory.py, Studio path layout.

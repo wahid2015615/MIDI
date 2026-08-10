@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field, field_validator
 
 from app.features.generation.ai_client import AIMusicError
 from app.features.generation.service import (
@@ -22,6 +23,27 @@ from app.shared.midi_response import (
 
 
 router = APIRouter(tags=["text-to-midi"])
+
+
+@router.post("/generate/cancel")
+def cancel_generate(body: dict | None = None) -> dict[str, bool]:
+    """Best-effort abort of in-flight local-model generation.
+
+    Optional JSON body ``{"client_request_id": "..."}`` cancels only that
+    request. Omitted / empty cancels all currently registered generates.
+    Cancel is observed at AI checkpoints (before/after llama.cpp completion);
+    mid-inference CPU work may finish before the HTTP call returns 499.
+    """
+    from app.features.generation.ai_client import request_generation_cancel
+
+    client_request_id = None
+    if isinstance(body, dict):
+        raw = body.get("client_request_id")
+        if raw is not None:
+            cleaned = str(raw).strip()
+            client_request_id = cleaned or None
+    request_generation_cancel(client_request_id)
+    return {"cancelled": True}
 
 
 def _ts_tuple(body: TextGenerateRequest) -> tuple[int, int] | None:
@@ -77,6 +99,7 @@ def generate_text(body: TextGenerateRequest):
             instrument_chords=None if mix is None else mix.instrument_chords,
             instrument_bass=None if mix is None else mix.instrument_bass,
             instrument_drums=None if mix is None else mix.instrument_drums,
+            client_request_id=body.client_request_id,
         )
         apply_score_meta(engine, time_signature=body.time_signature, key=body.key)
         apply_track_mix(engine, body.mix)
@@ -97,7 +120,7 @@ def generate_text(body: TextGenerateRequest):
             body.file_type,
             duplicate_score_meta=body.duplicate_score_meta,
         )
-    except (AIMusicError, ValueError, HTTPException) as exc:
+    except (AIMusicError, ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)
 
 
@@ -127,6 +150,7 @@ def generate_text_preview(body: TextGenerateRequest) -> dict:
             instrument_chords=None if mix is None else mix.instrument_chords,
             instrument_bass=None if mix is None else mix.instrument_bass,
             instrument_drums=None if mix is None else mix.instrument_drums,
+            client_request_id=body.client_request_id,
         )
         apply_score_meta(engine, time_signature=body.time_signature, key=body.key)
         apply_track_mix(engine, body.mix)
@@ -141,16 +165,27 @@ def generate_text_preview(body: TextGenerateRequest) -> dict:
         apply_timing(engine, body.timing, seed=body.seed)
         ensure_exportable(engine)
         return engine_meta(engine)
-    except (AIMusicError, ValueError, HTTPException) as exc:
+    except (AIMusicError, ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)
 
 
+class TextParseRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=8000)
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def _normalize_prompt(cls, value: object) -> str:
+        if value is None:
+            raise ValueError("prompt is required")
+        cleaned = str(value).strip()
+        if not cleaned:
+            raise ValueError("prompt must not be empty")
+        return cleaned
+
+
 @router.post("/parse/text")
-def parse_text(body: dict) -> dict:
-    prompt = str(body.get("prompt", "") or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt is required")
-    result = parse_text_prompt_detailed(prompt)
+def parse_text(body: TextParseRequest) -> dict:
+    result = parse_text_prompt_detailed(body.prompt)
     spec = result.spec
     return {
         "bars": spec.bars,

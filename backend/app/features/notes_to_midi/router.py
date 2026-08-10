@@ -45,5 +45,5 @@ def generate_notes(body: NotesGenerateRequest):
             body.file_type,
             duplicate_score_meta=body.duplicate_score_meta,
         )
-    except (ValueError, HTTPException) as exc:
+    except (ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)

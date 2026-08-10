@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
+  cancelGenerationRequest,
   fetchHealth,
   fetchMeta,
   generateFromChords,
@@ -10,20 +11,25 @@ import {
   generateFromText,
   isAbortError,
   parseTextPrompt,
+  resolveApiBase,
 } from "../api/studioApi";
 import {
   BARS_DEFAULT,
   BARS_MAX,
+  BARS_MAX_API,
   BARS_MIN,
   BPM_MAX,
   BPM_MIN,
   clampBars,
   clampBpm,
   canonicalTrackRole,
+  DEFAULT_FILENAME_BY_MODE,
   DEFAULT_INSTRUMENTS,
   DEFAULT_MOOD,
   DEFAULT_STYLE,
   DEFAULT_TIME_SIGNATURE,
+  defaultFilenameForMode,
+  isDrumInstrument,
   isValidBars,
   isValidMood,
   isValidStyle,
@@ -35,6 +41,7 @@ import {
   normalizeMood,
   normalizeStyle,
   normalizeTimeSignature,
+  STOCK_FILENAMES,
   STYLES,
   TS_DENOMINATORS,
   TS_NUMERATOR_MAX,
@@ -46,20 +53,116 @@ import {
 import type { Mode, TrackRole } from "../types";
 import { Field } from "../../../shared/ui/Field";
 
-/** Mirror backend `parse_progression_string` separators. */
+/** Mirror backend `parse_progression_string` (incl. jazz hyphen repair). */
 function splitChordProgression(text: string): string[] {
-  const normalized = text.replaceAll("→", "-").replaceAll("->", "-");
-  let parts: string[];
+  const normalized = text
+    .replaceAll("→", "->")
+    .replaceAll("–", "-")
+    .replaceAll("—", "-");
+
+  const expandMixed = (parts: string[]) => {
+    const expanded: string[] = [];
+    for (const part of parts) {
+      const textPart = part.trim();
+      if (!textPart) continue;
+      if (/\s-\s/.test(textPart)) {
+        expanded.push(...textPart.split(/\s+-\s+/));
+      } else if (textPart.includes(",")) {
+        expanded.push(...textPart.split(","));
+      } else {
+        expanded.push(textPart);
+      }
+    }
+    return expanded;
+  };
+
+  let rawParts: string[];
   if (normalized.includes("|")) {
-    parts = normalized.split("|");
-  } else if (normalized.includes("-") || normalized.includes("–")) {
-    parts = normalized.split(/[-–]/);
+    rawParts = expandMixed(normalized.split("|"));
+  } else if (normalized.includes("->")) {
+    rawParts = expandMixed(normalized.split(/\s*->\s*/));
+  } else if (/\s-\s/.test(normalized)) {
+    // Spaced dashes: safe for jazz C-7 - F-7
+    rawParts = normalized.split(/\s+-\s+/);
   } else if (normalized.includes(",")) {
-    parts = normalized.split(",");
+    rawParts = normalized.split(",");
+  } else if (normalized.includes("-")) {
+    // Unspaced C-G-Am; repair C-7 → C + 7 fragments
+    const repaired: string[] = [];
+    for (const part of normalized.split("-")) {
+      const token = part.trim().replace(/^[,|]+|[,|]+$/g, "").trim();
+      if (!token) continue;
+      if (repaired.length && !/^[A-Ga-g]/.test(token)) {
+        repaired[repaired.length - 1] = `${repaired[repaired.length - 1]}-${token}`;
+      } else {
+        repaired.push(token);
+      }
+    }
+    return repaired;
   } else {
-    parts = normalized.split(/\s+/);
+    rawParts = normalized.split(/\s+/);
   }
-  return parts.map((p) => p.trim().replace(/^[,|]+|[,|]+$/g, "").trim()).filter(Boolean);
+
+  return rawParts
+    .map((p) => p.trim().replace(/^[,|]+|[,|]+$/g, "").trim())
+    .filter(Boolean);
+}
+
+function looksLikeChordSymbol(token: string): boolean {
+  return /^[A-Ga-g](?:#|b|♯|♭)?/.test(token.trim());
+}
+
+/** Rough Notes duration in bars from rest/note duration tokens. */
+function estimateNotesBars(notesText: string, beatsPerBar: number): number {
+  const tokenBeats: Record<string, number> = {
+    w: 4,
+    whole: 4,
+    h: 2,
+    half: 2,
+    q: 1,
+    quarter: 1,
+    e: 0.5,
+    eighth: 0.5,
+    "8th": 0.5,
+    s: 0.25,
+    sixteenth: 0.25,
+    "16th": 0.25,
+  };
+  const perTrack = new Map<string, number>();
+  let current = "melody";
+  perTrack.set(current, 0);
+  for (const raw of notesText.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const lower = line.toLowerCase();
+    if (lower.startsWith("#") && !lower.startsWith("#track")) continue;
+    const trackMatch = /^(?:@track|#track)\s+(\S+)/i.exec(line);
+    const sectionMatch = /^\[\s*([A-Za-z]\w*)/i.exec(line);
+    if (trackMatch || sectionMatch) {
+      const name = (trackMatch?.[1] || sectionMatch?.[1] || "melody").toLowerCase();
+      current = name;
+      if (!perTrack.has(current)) perTrack.set(current, 0);
+      continue;
+    }
+    if (lower.startsWith("[")) continue;
+    const parts = line.split(/\s+/);
+    let beats = 1;
+    if (lower === "r" || lower.startsWith("rest") || lower.startsWith("r ")) {
+      const durTok = parts.slice(1).join(" ").toLowerCase() || "quarter";
+      const first = durTok.split(/\s+/)[0] || "quarter";
+      beats = tokenBeats[first] ?? Number(first) || 1;
+    } else {
+      // duration is after pitches
+      let i = 0;
+      while (i < parts.length && /^[A-Ga-g]/.test(parts[i])) i += 1;
+      const durTok = (parts[i] || "q").toLowerCase();
+      beats = tokenBeats[durTok] ?? Number(durTok) || 1;
+    }
+    if (!Number.isFinite(beats) || beats <= 0) beats = 1;
+    perTrack.set(current, (perTrack.get(current) || 0) + beats);
+  }
+  const maxBeats = Math.max(0, ...perTrack.values());
+  return Math.max(1, Math.ceil(maxBeats / Math.max(0.25, beatsPerBar)));
 }
 
 const TRACK_META: {
@@ -97,8 +200,10 @@ export default function StudioPage() {
   const [apiVersion, setApiVersion] = useState("");
   const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
   const [aiOnline, setAiOnline] = useState<boolean | null>(null);
+  const [aiLoaded, setAiLoaded] = useState<boolean | null>(null);
   const [aiModel, setAiModel] = useState("");
   const [aiProvider, setAiProvider] = useState("local");
+  const [apiDisplayBase, setApiDisplayBase] = useState(API_BASE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -124,7 +229,23 @@ export default function StudioPage() {
   const [mood, setMood] = useState<Mood>(DEFAULT_MOOD);
   const [style, setStyle] = useState<Style>(DEFAULT_STYLE);
   const [fileType, setFileType] = useState<0 | 1>(1);
-  const [filename, setFilename] = useState("uplifting_piano.mid");
+  const [duplicateScoreMeta, setDuplicateScoreMeta] = useState(false);
+  const [filename, setFilename] = useState(DEFAULT_FILENAME_BY_MODE.text);
+  /** When false, switching Text/Chords/Notes can refresh a stock default name. */
+  const filenameCustomRef = useRef(false);
+
+  function applyStockFilename(name: string) {
+    filenameCustomRef.current = false;
+    setFilename(name);
+  }
+
+  function setModeAndMaybeFilename(next: Mode) {
+    setMode(next);
+    const current = filename.trim();
+    if (!filenameCustomRef.current || !current || STOCK_FILENAMES.has(current)) {
+      applyStockFilename(defaultFilenameForMode(next));
+    }
+  }
 
   /** Fields the user edited manually — prompt auto-fill must not overwrite these. */
   const touchedRef = useRef<Set<PromptFillField>>(new Set());
@@ -232,26 +353,44 @@ export default function StudioPage() {
 
   const [instrumentOptions, setInstrumentOptions] = useState(DEFAULT_INSTRUMENTS);
   const abortRef = useRef<AbortController | null>(null);
+  const requestIdRef = useRef(0);
+  const healthFailStreakRef = useRef(0);
+  const healthSeqRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
+    setApiDisplayBase(resolveApiBase());
 
     async function refreshHealth(probe: boolean) {
+      const seq = ++healthSeqRef.current;
       try {
         const health = await fetchHealth({ probe });
-        if (!alive) return;
+        if (!alive || seq !== healthSeqRef.current) return;
+        healthFailStreakRef.current = 0;
         setApiOk(true);
         setApiVersion(health.version);
         setAiConfigured(Boolean(health.ai?.configured));
         setAiOnline(
           health.ai?.configured ? Boolean(health.ai?.online) : false,
         );
+        setAiLoaded(
+          health.ai?.configured
+            ? Boolean(
+                health.ai?.loaded ??
+                  (probe ? health.ai?.online : false),
+              )
+            : false,
+        );
         setAiModel(health.ai?.model || "");
         setAiProvider(health.ai?.provider || "local");
       } catch {
-        if (alive) {
+        if (!alive || seq !== healthSeqRef.current) return;
+        healthFailStreakRef.current += 1;
+        // Ignore a single transient failure; mark offline after 2 consecutive misses.
+        if (healthFailStreakRef.current >= 2) {
           setApiOk(false);
           setAiOnline(false);
+          setAiLoaded(false);
         }
       }
     }
@@ -288,6 +427,8 @@ export default function StudioPage() {
       alive = false;
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
+      const pendingId = requestIdRef.current;
+      void cancelGenerationRequest(String(pendingId));
       abortRef.current?.abort();
     };
   }, []);
@@ -388,16 +529,21 @@ export default function StudioPage() {
 
   const notesTrackRoles = useMemo(() => {
     const roles = new Set<TrackRole>();
+    let hasUnmapped = false;
     const re =
-      /^(?:@track|#track)\s+(\S+)|^\[\s*([A-Za-z]\w*)/i;
+      /^(?:@track|#track)\s+(\S+)|^\[\s*([A-Za-z][\w\s]*?)(?:\s+[^\]]+)?\s*\]/i;
     for (const raw of notesText.split("\n")) {
       const m = re.exec(raw.trim());
       if (!m) continue;
-      const name = m[1] || m[2] || "";
+      const name = (m[1] || m[2] || "").trim();
+      if (!name) continue;
       const role = canonicalTrackRole(name);
       if (role) roles.add(role);
+      else hasUnmapped = true;
     }
-    if (roles.size === 0) roles.add("melody");
+    // Custom labels (Violin, …) follow Melody mix on the backend — keep Melody
+    // active whenever an unmapped track exists (even alongside Bass/Drums).
+    if (roles.size === 0 || hasUnmapped) roles.add("melody");
     return roles;
   }, [notesText]);
 
@@ -444,6 +590,26 @@ export default function StudioPage() {
     mode,
     notesTrackRoles,
   ]);
+
+  // Melodic roles must never keep a drum kit selected (backend rejects it).
+  useEffect(() => {
+    setTrackInstrument((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const role of ["melody", "chords", "bass"] as const) {
+        if (isDrumInstrument(next[role])) {
+          next[role] =
+            role === "chords"
+              ? "electric_piano_1"
+              : role === "bass"
+                ? "electric_bass_finger"
+                : "acoustic_grand_piano";
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [trackInstrument.melody, trackInstrument.chords, trackInstrument.bass]);
 
   const timing = useMemo(
     () => ({
@@ -524,7 +690,8 @@ export default function StudioPage() {
 
   /** Text mode needs the local GGUF; chords + notes are deterministic. */
   const needsAi = mode === "text";
-  const aiReady = !needsAi || (aiConfigured === true && aiOnline === true);
+  // Configured file is enough — idle unload may clear RAM; generate will reload.
+  const aiReady = !needsAi || aiConfigured === true;
   const promptReady = mode !== "text" || prompt.trim().length > 0;
   const generateBlocked =
     loading ||
@@ -539,25 +706,10 @@ export default function StudioPage() {
       ? Math.max(
           1,
           splitChordProgression(progression).length *
-            Math.max(0.25, barsPerChord),
+            Math.max(0.0625, Number.isFinite(barsPerChord) ? barsPerChord : 1),
         )
       : mode === "notes"
-        ? Math.max(
-            1,
-            Math.ceil(
-              notesText
-                .split("\n")
-                .filter(
-                  (l) =>
-                    l.trim() &&
-                    !l.trim().startsWith("@") &&
-                    !l.trim().startsWith("[") &&
-                    !(l.trim().startsWith("#") && !l.trim().toLowerCase().startsWith("#track")),
-                ).length /
-                Math.max(1, notesTrackRoles.size) /
-                4,
-            ),
-          )
+        ? estimateNotesBars(notesText, beatsPerBar)
         : bars,
     bpm,
     beatsPerBar,
@@ -565,33 +717,28 @@ export default function StudioPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setError(null);
     setSuccess(null);
     if (activeTrackCount === 0) {
       setError("Enable at least one track role before generating");
-      setLoading(false);
       return;
     }
     if (mode === "text" && !prompt.trim()) {
       setError("Enter a text prompt before generating");
-      setLoading(false);
       return;
     }
     if (needsAi && !aiReady) {
       setError(
         aiConfigured === false
           ? "Local GGUF model is missing — place it under backend/models/"
-          : "Local model is offline — wait for it to load, or check backend logs",
+          : "Local model status unknown — wait for API health check",
       );
-      setLoading(false);
       return;
     }
     const safeBpm = clampBpm(bpm);
     if (safeBpm !== bpm) setBpm(safeBpm);
     if (mode === "text" && !isValidBars(bars)) {
       setError(`bars must be between ${BARS_MIN} and ${BARS_MAX}, got ${bars}`);
-      setLoading(false);
       return;
     }
     const safeBars = mode === "text" ? normalizeBars(bars) : bars;
@@ -600,14 +747,12 @@ export default function StudioPage() {
         setError(
           `Unsupported mood "${mood}". Allowed values: ${MOODS.join(", ")}`,
         );
-        setLoading(false);
         return;
       }
       if (!isValidStyle(style)) {
         setError(
           `Unsupported style "${style}". Allowed values: ${STYLES.join(", ")}`,
         );
-        setLoading(false);
         return;
       }
     }
@@ -619,18 +764,43 @@ export default function StudioPage() {
           `Use numerator ${TS_NUMERATOR_MIN}–${TS_NUMERATOR_MAX} and ` +
           `denominator ${TS_DENOMINATORS.join(", ")}.`,
       );
-      setLoading(false);
       return;
     }
     const safeTs = normalizeTimeSignature(tsNumerator, tsDenominator);
 
+    if (sustain && sustainOnValue === sustainOffValue) {
+      setError("Sustain on and off CC64 values must differ");
+      return;
+    }
+
     let chordParts: string[] = [];
     let notes: string[] = [];
+    let safeBarsPerChord = 1;
     if (mode === "chords") {
       chordParts = splitChordProgression(progression);
       if (chordParts.length === 0) {
         setError("Enter at least one chord (e.g. C | G | Am | F)");
-        setLoading(false);
+        return;
+      }
+      const bad = chordParts.filter((t) => !looksLikeChordSymbol(t));
+      if (bad.length) {
+        setError(
+          `Invalid chord(s): ${bad.slice(0, 6).join(", ")}. Use symbols like C, Am, G7, Dm7.`,
+        );
+        return;
+      }
+      safeBarsPerChord = Number(barsPerChord);
+      if (!Number.isFinite(safeBarsPerChord) || safeBarsPerChord <= 0) {
+        setError("Bars per chord must be greater than 0");
+        return;
+      }
+      safeBarsPerChord = Math.min(16, Math.max(0.0625, safeBarsPerChord));
+      const totalBars = chordParts.length * safeBarsPerChord;
+      if (totalBars > BARS_MAX_API) {
+        setError(
+          `Chord progression spans ${totalBars.toFixed(2)} bars ` +
+            `(${chordParts.length} × ${safeBarsPerChord}); maximum is ${BARS_MAX_API}`,
+        );
         return;
       }
     } else if (mode === "notes") {
@@ -640,7 +810,6 @@ export default function StudioPage() {
         .filter(Boolean);
       if (notes.length === 0) {
         setError("Enter at least one note line (or @track / [Section] block)");
-        setLoading(false);
         return;
       }
         const hasNoteToken = notes.some((line) => {
@@ -654,14 +823,20 @@ export default function StudioPage() {
         });
       if (!hasNoteToken) {
         setError("Note list has no playable notes — add lines like: C4 q");
-        setLoading(false);
         return;
       }
     }
 
-    abortRef.current?.abort();
+    // Abort any previous in-flight request and cancel matching AI work.
+    if (abortRef.current) {
+      void cancelGenerationRequest(String(requestIdRef.current));
+      abortRef.current.abort();
+    }
     const controller = new AbortController();
     abortRef.current = controller;
+    const requestId = ++requestIdRef.current;
+    const clientRequestId = String(requestId);
+    setLoading(true);
     const { signal } = controller;
     try {
       let result;
@@ -681,8 +856,10 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            filename,
+            duplicate_score_meta: duplicateScoreMeta,
+            filename: filename.trim() || defaultFilenameForMode("text"),
             seed,
+            client_request_id: clientRequestId,
           },
           { signal },
         );
@@ -691,7 +868,7 @@ export default function StudioPage() {
           {
             progression,
             bpm: safeBpm,
-            bars_per_chord: barsPerChord,
+            bars_per_chord: safeBarsPerChord,
             key,
             time_signature: safeTs,
             instrument: trackInstrument.melody,
@@ -703,7 +880,8 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            filename: filename || "chords.mid",
+            duplicate_score_meta: duplicateScoreMeta,
+            filename: filename.trim() || defaultFilenameForMode("chords"),
             seed,
           },
           { signal },
@@ -720,12 +898,14 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            filename: filename || "notes.mid",
+            duplicate_score_meta: duplicateScoreMeta,
+            filename: filename.trim() || defaultFilenameForMode("notes"),
             seed,
           },
           { signal },
         );
       }
+      if (requestId !== requestIdRef.current) return;
       setSuccess(
         `Downloaded ${result.filename}` +
           (result.bpm ? ` · ${result.bpm} BPM` : "") +
@@ -734,21 +914,26 @@ export default function StudioPage() {
           (result.bars ? ` · ${result.bars} bars` : "") +
           (result.tracks ? ` · ${result.tracks} tracks` : ""),
       );
+      if (needsAi) setAiLoaded(true);
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       if (isAbortError(err)) {
         setError("Generation cancelled");
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong");
       }
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (requestId === requestIdRef.current) {
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
+        setLoading(false);
       }
-      setLoading(false);
     }
   }
 
   function cancelGeneration() {
+    void cancelGenerationRequest(String(requestIdRef.current));
     abortRef.current?.abort();
   }
 
@@ -803,21 +988,34 @@ export default function StudioPage() {
             />
             {apiOk === null && "Checking API"}
             {apiOk === true && `API v${apiVersion || "0.1"}`}
-            {apiOk === false && `API offline · ${API_BASE}`}
+            {apiOk === false && `API offline · ${apiDisplayBase}`}
           </span>
           <span
             className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${
-              aiConfigured && aiOnline
+              aiConfigured && aiLoaded
                 ? "border-[var(--signal-soft)] bg-[var(--signal-soft)] text-[var(--accent-deep)]"
-                : aiConfigured
+                : aiConfigured && aiOnline !== false
                   ? "border-[#fde68a] bg-[#fffbeb] text-[#92400e]"
                   : "border-[var(--line)] bg-white text-[var(--muted)]"
             }`}
           >
-            {!aiConfigured && "Local model missing"}
-            {aiConfigured && aiOnline && `${aiProvider === "local" ? "Local" : aiProvider} · ${aiModel || "online"}`}
-            {aiConfigured && aiOnline === false && `Local offline · ${aiModel || "file"}`}
-            {aiConfigured && aiOnline === null && `Local · ${aiModel || "checking"}`}
+            {aiConfigured === null && "Checking model"}
+            {aiConfigured === false && "Local model missing"}
+            {aiConfigured === true &&
+              aiOnline === false &&
+              `Local offline · ${aiModel || "file"}`}
+            {aiConfigured === true &&
+              aiOnline !== false &&
+              aiLoaded &&
+              `${aiProvider === "local" ? "Local" : aiProvider} · ${aiModel || "loaded"}`}
+            {aiConfigured === true &&
+              aiOnline !== false &&
+              aiLoaded === false &&
+              `Local idle · ${aiModel || "file"} (loads on generate)`}
+            {aiConfigured === true &&
+              aiOnline !== false &&
+              aiLoaded === null &&
+              `Local · ${aiModel || "checking"}`}
           </span>
         </div>
       </header>
@@ -841,7 +1039,7 @@ export default function StudioPage() {
                   <button
                     key={id}
                     type="button"
-                    onClick={() => setMode(id)}
+                    onClick={() => setModeAndMaybeFilename(id)}
                     className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
                       mode === id
                         ? "bg-[var(--ink)] text-white shadow-sm"
@@ -951,15 +1149,15 @@ export default function StudioPage() {
                 <Field label="Bars / chord" hint="1–16">
                   <input
                     type="number"
-                    min={0.25}
+                    min={0.0625}
                     max={16}
-                    step={0.25}
+                    step={0.0625}
                     value={barsPerChord}
                     onChange={(e) => setBarsPerChord(Number(e.target.value))}
                     onBlur={() =>
                       setBarsPerChord((v) => {
                         if (!Number.isFinite(v) || v <= 0) return 1;
-                        return Math.min(16, Math.max(0.25, v));
+                        return Math.min(16, Math.max(0.0625, v));
                       })
                     }
                     className="field-input"
@@ -1087,10 +1285,29 @@ export default function StudioPage() {
                   <option value={0}>Type 0 · single track</option>
                 </select>
               </Field>
+              {fileType === 1 && (
+                <label className="flex items-start gap-2 text-xs text-[var(--muted)] sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={duplicateScoreMeta}
+                    onChange={(e) => setDuplicateScoreMeta(e.target.checked)}
+                  />
+                  <span>
+                    Duplicate tempo/time/key meta on every Type&nbsp;1 note track
+                    (helps some web MIDI players). Default keeps conductor-only
+                    SMF meta.
+                  </span>
+                </label>
+              )}
               <Field label="Filename">
                 <input
                   value={filename}
-                  onChange={(e) => setFilename(e.target.value)}
+                  onChange={(e) => {
+                    filenameCustomRef.current = true;
+                    setFilename(e.target.value);
+                  }}
+                  placeholder={defaultFilenameForMode(mode)}
                   className="field-input"
                 />
               </Field>
@@ -1214,7 +1431,10 @@ export default function StudioPage() {
                             }}
                             className="field-input py-1.5 text-sm"
                           >
-                            {instrumentOptions.map((opt) => (
+                            {(id === "drums"
+                              ? instrumentOptions
+                              : instrumentOptions.filter((opt) => !isDrumInstrument(opt))
+                            ).map((opt) => (
                               <option key={opt} value={opt}>
                                 {labelize(opt)}
                               </option>
@@ -1658,7 +1878,9 @@ export default function StudioPage() {
           {/* Sticky-ish generate */}
           <div className="section-card sticky bottom-4 z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
             <div className="text-sm text-[var(--muted)]">
-              <span className="font-bold text-[var(--ink)]">{filename || "out.mid"}</span>
+              <span className="font-bold text-[var(--ink)]">
+                {filename.trim() || defaultFilenameForMode(mode)}
+              </span>
               <span className="mx-2">·</span>
               {bpm} BPM · ~{durationSec}s · Type {fileType} · {activeTrackCount} tracks
               {loading && needsAi && (
@@ -1691,7 +1913,7 @@ export default function StudioPage() {
                 ) : !aiReady ? (
                   aiConfigured === false
                     ? "Model missing"
-                    : "Waiting for local model…"
+                    : "Checking local model…"
                 ) : apiOk === false ? (
                   "API offline"
                 ) : (
@@ -1719,7 +1941,7 @@ export default function StudioPage() {
             <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[var(--signal)]">
               Session
             </p>
-            <h2 className="brand mt-2 text-3xl">Export preview</h2>
+            <h2 className="brand mt-2 text-3xl">Session summary</h2>
             <dl className="mt-5 space-y-3 text-sm text-[#c5d4dc]">
               <div className="flex justify-between gap-3">
                 <dt>Mode</dt>
@@ -1790,7 +2012,7 @@ export default function StudioPage() {
                       drums: false,
                     });
                     clearSolos();
-                    setFilename("happy_piano.mid");
+                    applyStockFilename("text_happy_piano.mid");
                   }}
                 >
                   <span className="block text-sm font-bold text-[var(--ink)]">
@@ -1828,7 +2050,7 @@ export default function StudioPage() {
                       drums: false,
                     });
                     clearSolos();
-                    setFilename("sad_violin.mid");
+                    applyStockFilename("text_sad_violin.mid");
                   }}
                 >
                   <span className="block text-sm font-bold text-[var(--ink)]">
@@ -1855,7 +2077,7 @@ export default function StudioPage() {
                       drums: true,
                     });
                     clearSolos();
-                    setFilename("progression.mid");
+                    applyStockFilename("chords_progression.mid");
                   }}
                 >
                   <span className="block text-sm font-bold text-[var(--ink)]">
@@ -1885,7 +2107,7 @@ export default function StudioPage() {
                       melody: "acoustic_grand_piano",
                     }));
                     clearSolos();
-                    setFilename("note_list.mid");
+                    applyStockFilename("notes_list.mid");
                   }}
                 >
                   <span className="block text-sm font-bold text-[var(--ink)]">

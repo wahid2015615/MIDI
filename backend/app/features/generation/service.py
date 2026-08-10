@@ -160,13 +160,19 @@ def parse_text_prompt_detailed(text: str) -> PromptParseResult:
     if re.search(r"\b(?:no|without)\s+drums?\b", lower):
         spec.include_drums = False
         detected["include_drums"] = True
-    elif re.search(
-        r"\b(?:with\s+drums?|add\s+drums?|drum\s*kit|drums?\s+track|and\s+drums?)\b",
-        lower,
-    ) or re.search(r"\bdrums?\b", lower):
-        # Affirmative drum mention (negation already handled above)
-        spec.include_drums = True
-        detected["include_drums"] = True
+    else:
+        # Genre "drum and bass" / DnB is not a drum-kit request
+        drums_text = re.sub(
+            r"\bdrum\s*(?:&|and|n)\s*bass\b|\bdn'?b\b",
+            " ",
+            lower,
+        )
+        if re.search(
+            r"\b(?:with\s+drums?|add\s+drums?|drum\s*kit|drums?\s+track|and\s+drums?)\b",
+            drums_text,
+        ) or re.search(r"\bdrums?\b", drums_text):
+            spec.include_drums = True
+            detected["include_drums"] = True
 
     instruments = {
         "electric piano": "electric_piano_1",
@@ -184,11 +190,17 @@ def parse_text_prompt_detailed(text: str) -> PromptParseResult:
     skip_bass_as_instrument = (not spec.include_bass) or bool(
         re.search(r"\bbass\s*lines?\b", lower)
     )
+    # Don't treat the genre phrase as an instrument cue either
+    instrument_text = re.sub(
+        r"\bdrum\s*(?:&|and|n)\s*bass\b|\bdn'?b\b",
+        " ",
+        lower,
+    )
     # Longer phrases first so "electric piano" / "bass guitar" win shorter words
     for name, program in sorted(instruments.items(), key=lambda kv: -len(kv[0])):
         if program == "electric_bass_finger" and skip_bass_as_instrument:
             continue
-        if re.search(rf"\b{re.escape(name)}\b", lower):
+        if re.search(rf"\b{re.escape(name)}\b", instrument_text):
             spec.instrument = program
             detected["instrument"] = True
             break
@@ -219,6 +231,7 @@ def generate_from_prompt(
     instrument_chords: str | None = None,
     instrument_bass: str | None = None,
     instrument_drums: str | None = None,
+    client_request_id: str | None = None,
 ) -> MidiEngine:
     spec = parse_text_prompt(text)
     if bpm is not None:
@@ -285,6 +298,7 @@ def generate_from_prompt(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             seed=seed,
+            client_request_id=client_request_id,
         )
     except AIMusicError:
         raise

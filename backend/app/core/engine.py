@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
@@ -10,6 +12,8 @@ from mido import Message, MetaMessage, MidiFile, MidiTrack as MidoTrack, bpm2tem
 
 from app.core.instruments import DRUM_CHANNEL, get_program, is_drum_instrument
 from app.core.smf_validate import validate_smf_file
+
+logger = logging.getLogger(__name__)
 
 # Safe BPM range for SMF set_tempo (mido 24-bit microseconds)
 BPM_MIN = 4.0
@@ -24,6 +28,36 @@ VALID_TS_DENOMINATORS: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
 BARS_MIN = 1
 BARS_MAX = 512
 BARS_DEFAULT = 16
+
+# Absolute beat-time ceiling (~512 bars × 16/4 time). Rejects Inf / DoS sizes.
+BEAT_TIME_MAX = float(BARS_MAX * 16)
+
+PPQ_MIN = 24
+PPQ_MAX = 9600
+
+
+def require_finite_beat(
+    value: float,
+    *,
+    name: str,
+    allow_zero: bool = False,
+    maximum: float = BEAT_TIME_MAX,
+) -> float:
+    """Validate a beat time is finite and within export-safe bounds."""
+    try:
+        beat = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(beat):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    if allow_zero:
+        if beat < 0:
+            raise ValueError(f"{name} must be >= 0")
+    elif beat <= 0:
+        raise ValueError(f"{name} must be > 0")
+    if beat > maximum:
+        raise ValueError(f"{name} must be <= {maximum:g}, got {beat:g}")
+    return beat
 
 
 def clamp_bpm(bpm: float) -> float:
@@ -123,10 +157,12 @@ class NoteEvent:
             raise ValueError(f"pitch must be 0-127, got {self.pitch}")
         if not 1 <= self.velocity <= 127:
             raise ValueError(f"velocity must be 1-127, got {self.velocity}")
-        if self.duration_beats <= 0:
-            raise ValueError("duration_beats must be > 0")
-        if self.start_beat < 0:
-            raise ValueError("start_beat must be >= 0")
+        self.start_beat = require_finite_beat(
+            self.start_beat, name="start_beat", allow_zero=True
+        )
+        self.duration_beats = require_finite_beat(
+            self.duration_beats, name="duration_beats", allow_zero=False
+        )
 
 
 @dataclass
@@ -140,8 +176,9 @@ class CCEvent:
             raise ValueError(f"CC control must be 0-127, got {self.control}")
         if not 0 <= self.value <= 127:
             raise ValueError(f"CC value must be 0-127, got {self.value}")
-        if self.time_beat < 0:
-            raise ValueError("CC time_beat must be >= 0")
+        self.time_beat = require_finite_beat(
+            self.time_beat, name="CC time_beat", allow_zero=True
+        )
 
 
 @dataclass
@@ -152,8 +189,9 @@ class PitchBendEvent:
     def __post_init__(self) -> None:
         if not 0 <= self.value <= 16383:
             raise ValueError(f"pitch bend must be 0-16383, got {self.value}")
-        if self.time_beat < 0:
-            raise ValueError("pitch bend time_beat must be >= 0")
+        self.time_beat = require_finite_beat(
+            self.time_beat, name="pitch bend time_beat", allow_zero=True
+        )
 
 
 @dataclass
@@ -215,7 +253,16 @@ class MidiEngine:
         self.bpm = clamp_bpm(bpm)
         self.time_signature = normalize_time_signature(*time_signature)
         self.key_signature = key_signature
-        self.ppq = ticks_per_beat or ppq
+        raw_ppq = ppq if ticks_per_beat is None else ticks_per_beat
+        try:
+            ppq_val = int(raw_ppq)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"ppq must be an integer, got {raw_ppq!r}") from exc
+        if not PPQ_MIN <= ppq_val <= PPQ_MAX:
+            raise ValueError(
+                f"ppq must be between {PPQ_MIN} and {PPQ_MAX}, got {ppq_val}"
+            )
+        self.ppq = ppq_val
         self.tracks: list[MidiTrack] = []
 
     def _next_melodic_channel(self) -> int:
@@ -302,7 +349,18 @@ class MidiEngine:
         return track
 
     def beats_to_ticks(self, beats: float) -> int:
-        return max(0, int(round(beats * self.ppq)))
+        try:
+            value = float(beats)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"beats must be a number, got {beats!r}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"beats must be finite, got {beats!r}")
+        try:
+            return max(0, int(round(value * self.ppq)))
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(
+                f"Beat time too large for PPQ conversion: {beats!r}"
+            ) from exc
 
     def _resolve_same_pitch_overlaps(
         self, notes: list[NoteEvent]
@@ -329,7 +387,20 @@ class MidiEngine:
                     if note.start_beat <= prev.start_beat:
                         # Same attack time: keep the longer note only
                         if note.duration_beats > prev.duration_beats:
+                            logger.debug(
+                                "Same-pitch same-start overlap: keeping longer "
+                                "note (pitch=%s, duration=%s); dropping shorter",
+                                pitch,
+                                note.duration_beats,
+                            )
                             group[-1] = note
+                        else:
+                            logger.debug(
+                                "Same-pitch same-start overlap: dropping shorter "
+                                "note (pitch=%s, duration=%s)",
+                                pitch,
+                                note.duration_beats,
+                            )
                         continue
                     if prev_end > note.start_beat:
                         truncated = note.start_beat - prev.start_beat
@@ -363,12 +434,10 @@ class MidiEngine:
                 events.append(
                     (0, MetaMessage("key_signature", key=self.key_signature))
                 )
-            except ValueError:
-                # Last-resort fallback so exporters never silently omit key meta
-                try:
-                    events.append((0, MetaMessage("key_signature", key="C")))
-                except ValueError:
-                    pass
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unsupported key signature {self.key_signature!r}"
+                ) from exc
         return events
 
     def _active_tracks(self) -> list[MidiTrack]:

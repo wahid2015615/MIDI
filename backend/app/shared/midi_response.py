@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -51,7 +53,7 @@ def ensure_exportable(engine: MidiEngine) -> None:
 
 
 def safe_filename(name: str) -> str:
-    name = name.strip() or "generated.mid"
+    name = name.strip() or "midi_output.mid"
     name = re.sub(r"[^\w.\-]+", "_", name)
     if not name.lower().endswith(".mid"):
         name += ".mid"
@@ -124,16 +126,23 @@ def apply_track_mix(engine: MidiEngine, mix: TrackMixOptions | None) -> None:
     }
     for track in engine.tracks:
         key = _canonical_track_name(track.name).strip().lower()
-        if key not in mapping:
-            continue
-        muted, solo, volume, pan, instrument, channel = mapping[key]
+        if key in mapping:
+            muted, solo, volume, pan, instrument, channel = mapping[key]
+            apply_instrument = True
+        else:
+            # Custom notes labels (Violin, Guitar, …) follow Melody mute/solo/vol/pan
+            # so Studio mixer controls still work; keep @track instrument/channel.
+            muted, solo, volume, pan, _inst, _ch = mapping["melody"]
+            instrument = None
+            channel = None
+            apply_instrument = False
         track.muted = bool(muted)
         track.solo = bool(solo)
         if volume is not None:
             track.volume = volume
         if pan is not None:
             track.pan = pan
-        if instrument:
+        if apply_instrument and instrument:
             get_program(instrument)  # raise on unknown — never silent piano
             # Melodic mixer roles cannot use GM drum kit (would force channel 9
             # and collide with a real Drums track).
@@ -145,7 +154,7 @@ def apply_track_mix(engine: MidiEngine, mix: TrackMixOptions | None) -> None:
             track.instrument = instrument
             if is_drum_instrument(instrument) and channel is None:
                 track.channel = DRUM_CHANNEL
-        if channel is not None:
+        if apply_instrument and channel is not None:
             if is_drum_instrument(track.instrument):
                 track.channel = DRUM_CHANNEL
             elif int(channel) == DRUM_CHANNEL:
@@ -191,9 +200,12 @@ def apply_track_selection(
         role = _canonical_track_name(track.name).strip().lower()
         include = wanted.get(role)
         if include is False:
+            # Role disabled in the UI / API — exclude fully (solo must not revive it).
             track.muted = True
+            track.solo = False
         elif any_specified and role not in MIXER_ROLES:
             track.muted = True
+            track.solo = False
 
 
 def apply_timing(
@@ -287,8 +299,14 @@ def apply_timing(
 def apply_expression_options(
     engine: MidiEngine, expression: ExpressionOptions | None
 ) -> None:
-    """Apply sustain / modulation / pitch bend into tracks before export."""
-    opts = expression or ExpressionOptions()
+    """Apply sustain / modulation / pitch bend into tracks before export.
+
+    ``None`` is a no-op (same as ``apply_timing(..., None)``). Send an explicit
+    ``ExpressionOptions()`` if you want the historical all-toggles-on defaults.
+    """
+    if expression is None:
+        return
+    opts = expression
     apply_expression(
         engine,
         sustain=opts.sustain,
@@ -337,6 +355,35 @@ def engine_meta(engine: MidiEngine) -> dict:
 GENERATED_DIR = Path(__file__).resolve().parents[2] / "generated"
 
 
+def _archive_max_files() -> int:
+    raw = (os.getenv("GENERATED_ARCHIVE_MAX") or "200").strip()
+    try:
+        return max(10, int(raw))
+    except ValueError:
+        return 200
+
+
+def _prune_generated_archive() -> None:
+    """Keep only the newest archive files under generated/."""
+    limit = _archive_max_files()
+    try:
+        files = [
+            p
+            for p in GENERATED_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() == ".mid"
+        ]
+    except OSError:
+        return
+    if len(files) <= limit:
+        return
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in files[limit:]:
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def _archive_generated_copy(source: Path, filename: str) -> Path | None:
     """Copy export into backend/generated/ with a timestamp so files do not collide."""
     from datetime import datetime
@@ -346,10 +393,22 @@ def _archive_generated_copy(source: Path, filename: str) -> Path | None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = GENERATED_DIR / f"{stamp}_{filename}"
         shutil.copy2(source, dest)
+        _prune_generated_archive()
         return dest
     except OSError:
         # Download must still succeed even if archive write fails.
         return None
+
+
+def _cleanup_export_tmpdir(tmp_dir: str) -> None:
+    """Retry temp deletion — Windows often holds the file until response finishes."""
+    for attempt in range(6):
+        try:
+            shutil.rmtree(tmp_dir)
+            return
+        except OSError:
+            time.sleep(0.05 * (attempt + 1))
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def send_midi(
@@ -397,5 +456,5 @@ def send_midi(
         media_type="audio/midi",
         filename=filename,
         headers=headers,
-        background=BackgroundTask(shutil.rmtree, tmp_dir, True),
+        background=BackgroundTask(_cleanup_export_tmpdir, tmp_dir),
     )

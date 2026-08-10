@@ -131,7 +131,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Ensure `NEXT_PUBLIC_API_URL` matches the backend URL (default `http://127.0.0.1:8000`).
+Open [http://localhost:3001](http://localhost:3001). Ensure `NEXT_PUBLIC_API_URL` matches the backend URL (default `http://127.0.0.1:8000`).
 
 On Windows: `start-frontend.bat` from the repo root.
 
@@ -142,11 +142,12 @@ On Windows: `start-frontend.bat` from the repo root.
 | Variable              | Description                                | Default                      |
 | --------------------- | ------------------------------------------ | ---------------------------- |
 | `LOCAL_MODEL_PATH`    | Optional path to `.gguf`                   | `models/Qwen3-4B-Q4_K_M.gguf` |
-| `AI_TEMPERATURE`      | Sampling temperature (floor 0.2; seed → 0.2) | `0.3`                      |
+| `AI_TEMPERATURE`      | Sampling temperature (≥ 0; seed does not override) | `0.3`                |
 | `AI_MAX_TOKENS`       | Max completion tokens                      | `3072`                       |
 | `LOCAL_N_CTX`         | Context window                             | `4096`                       |
 | `LOCAL_N_THREADS`     | CPU threads (optional)                     | CPU count − 1                |
 | `LOCAL_N_GPU_LAYERS`  | Offload layers to GPU (`0` = CPU)          | `0`                          |
+| `MODEL_IDLE_UNLOAD_SECONDS` | Idle seconds before unloading GGUF from RAM | `120` (min 5)          |
 | `HOST`                | Bind address (`0.0.0.0` for deploy)        | `127.0.0.1`                  |
 | `PORT`                | Uvicorn port                               | `8000`                       |
 | `PORT_FALLBACK`       | Auto next free port if busy (`1` = yes)    | `0` (fail hard)              |
@@ -166,9 +167,10 @@ NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 
 | Method | Path                       | AI? | Description                              |
 | ------ | -------------------------- | --- | ---------------------------------------- |
-| `GET`  | `/health`                  | —   | Health, version, AI config (`?probe=1` loads/checks GGUF) |
+| `GET`  | `/health`                  | —   | Health, version, AI status (`?probe=1` loads/checks GGUF) |
 | `POST` | `/generate/text`           | Yes | Text prompt → `.mid` download            |
 | `POST` | `/generate/text/preview`   | Yes | Same generation, JSON metadata only      |
+| `POST` | `/generate/cancel`         | —   | Abort in-flight local GGUF compose       |
 | `POST` | `/parse/text`              | No  | Heuristic parse of prompt fields         |
 | `POST` | `/generate/chords`         | No  | Exact chord progression → `.mid`         |
 | `POST` | `/generate/notes`          | No  | Note lines → `.mid`                      |

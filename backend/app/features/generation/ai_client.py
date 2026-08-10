@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -17,6 +18,173 @@ logger = logging.getLogger(__name__)
 _llm = None
 _llm_path: str | None = None
 _llm_lock = threading.Lock()
+_idle_timer: threading.Timer | None = None
+# Bumped on cancel/reschedule so a late timer callback cannot unload a warm model
+_idle_generation = 0
+# Generations currently holding a live llm handle (blocks idle unload).
+_in_flight = 0
+# Per-generation cancel handles (isolates concurrent text generates).
+_cancel_lock = threading.Lock()
+_next_generation_id = 0
+_generation_cancelled: dict[int, bool] = {}
+_client_to_generation: dict[str, int] = {}
+# Idle unload after generation (seconds). Env override: MODEL_IDLE_UNLOAD_SECONDS
+_DEFAULT_IDLE_UNLOAD_SECONDS = 120.0
+
+
+def begin_generation(client_request_id: str | None = None) -> int:
+    """Register an in-flight compose; return a handle id for cancel checks."""
+    global _next_generation_id
+    cid = (client_request_id or "").strip() or None
+    with _cancel_lock:
+        _next_generation_id += 1
+        gid = _next_generation_id
+        _generation_cancelled[gid] = False
+        if cid:
+            previous = _client_to_generation.get(cid)
+            if previous is not None and previous in _generation_cancelled:
+                _generation_cancelled[previous] = True
+            _client_to_generation[cid] = gid
+        return gid
+
+
+def end_generation(generation_id: int, client_request_id: str | None = None) -> None:
+    """Drop cancel bookkeeping for a finished compose."""
+    cid = (client_request_id or "").strip() or None
+    with _cancel_lock:
+        _generation_cancelled.pop(generation_id, None)
+        if cid and _client_to_generation.get(cid) == generation_id:
+            _client_to_generation.pop(cid, None)
+
+
+def request_generation_cancel(client_request_id: str | None = None) -> None:
+    """Abort matching in-flight AI compose(s) at the next safe checkpoint.
+
+    If ``client_request_id`` is provided, only that generation is cancelled.
+    Otherwise every currently registered generation is cancelled.
+    Note: llama.cpp ``create_completion`` is not interruptible mid-call; cancel
+    is observed before/after inference.
+    """
+    cid = (client_request_id or "").strip() or None
+    with _cancel_lock:
+        if cid:
+            gid = _client_to_generation.get(cid)
+            if gid is not None and gid in _generation_cancelled:
+                _generation_cancelled[gid] = True
+            return
+        for gid in list(_generation_cancelled):
+            _generation_cancelled[gid] = True
+
+
+def _raise_if_cancelled(generation_id: int) -> None:
+    with _cancel_lock:
+        cancelled = _generation_cancelled.get(generation_id, True)
+    if cancelled:
+        raise AIMusicError("Generation cancelled")
+
+
+def _idle_unload_seconds() -> float:
+    raw = (os.getenv("MODEL_IDLE_UNLOAD_SECONDS") or "").strip()
+    if not raw:
+        return _DEFAULT_IDLE_UNLOAD_SECONDS
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return _DEFAULT_IDLE_UNLOAD_SECONDS
+
+
+def _cancel_idle_timer_locked() -> None:
+    """Cancel pending idle unload. Caller must hold ``_llm_lock``."""
+    global _idle_timer, _idle_generation
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+        _idle_timer = None
+    _idle_generation += 1
+
+
+def _cancel_idle_unload() -> None:
+    with _llm_lock:
+        _cancel_idle_timer_locked()
+
+
+def _close_llm_instance(llm: Any) -> None:
+    """Best-effort close + GC for a llama.cpp instance (caller drops references)."""
+    import gc
+
+    close = getattr(llm, "close", None)
+    try:
+        if callable(close):
+            close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Error while closing local model: %s", exc)
+    try:
+        del llm
+    except Exception:  # noqa: BLE001
+        pass
+    gc.collect()
+
+
+def _unload_llm_generation(expected_generation: int) -> None:
+    """Drop the cached GGUF if this timer is still the current idle epoch."""
+    global _llm, _llm_path, _idle_timer
+
+    with _llm_lock:
+        if expected_generation != _idle_generation:
+            return
+        if _in_flight > 0:
+            # A request is using the model; finally-block will reschedule unload.
+            return
+        _idle_timer = None
+        if _llm is None:
+            return
+        llm = _llm
+        _llm = None
+        _llm_path = None
+    _close_llm_instance(llm)
+    _log_step("Model unloaded from RAM (idle timeout)")
+
+
+def _unload_llm(*, reason: str = "idle timeout") -> None:
+    """Force-unload (tests / explicit). Always clears the current epoch."""
+    global _llm, _llm_path, _idle_timer, _idle_generation
+
+    with _llm_lock:
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+            _idle_timer = None
+        _idle_generation += 1
+        if _llm is None:
+            return
+        llm = _llm
+        _llm = None
+        _llm_path = None
+    _close_llm_instance(llm)
+    _log_step(f"Model unloaded from RAM ({reason})")
+
+
+def _schedule_idle_unload() -> None:
+    """Start / restart the idle timer; model stays loaded until it fires."""
+    global _idle_timer, _idle_generation
+    seconds = _idle_unload_seconds()
+    with _llm_lock:
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+            _idle_timer = None
+        _idle_generation += 1
+        if _llm is None or _in_flight > 0:
+            return
+        gen = _idle_generation
+        timer = threading.Timer(seconds, _unload_llm_generation, args=(gen,))
+        timer.daemon = True
+        _idle_timer = timer
+        timer.start()
+    _log_step(f"Model idle unload in {seconds:.0f}s (timer reset)")
+
+
+def model_is_loaded() -> bool:
+    """Return True if a GGUF instance is currently cached in this process."""
+    with _llm_lock:
+        return _llm is not None
 
 
 class AIMusicError(RuntimeError):
@@ -370,6 +538,15 @@ def _get_llm(cfg: AIConfig, *, quiet: bool = False):
                 f"(or set LOCAL_MODEL_PATH in backend/.env)."
             )
 
+        # Path change (or reload): close previous GGUF so RAM does not leak.
+        if _llm is not None:
+            old = _llm
+            _llm = None
+            _llm_path = None
+            _cancel_idle_timer_locked()
+            _close_llm_instance(old)
+            _log_step("Previous model closed before loading a new path")
+
         _log_step(
             f"Loading local model ({cfg.model}) — first time can take 30–90s..."
         )
@@ -395,23 +572,38 @@ def _get_llm(cfg: AIConfig, *, quiet: bool = False):
 
 def probe_provider(cfg: AIConfig | None = None) -> bool:
     """Return True if the GGUF file exists and loads."""
+    global _in_flight
     config = cfg or get_ai_config()
     if not config.configured:
         return False
     try:
-        _get_llm(config, quiet=True)
+        with _llm_lock:
+            _cancel_idle_timer_locked()
+            _in_flight += 1
+        try:
+            _get_llm(config, quiet=True)
+        finally:
+            with _llm_lock:
+                _in_flight = max(0, _in_flight - 1)
+        _schedule_idle_unload()
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("Local model probe failed: %s", exc)
+        if model_is_loaded():
+            _schedule_idle_unload()
         return False
 
 
 def model_status(*, probe: bool = False) -> dict[str, Any]:
     cfg = get_ai_config()
+    loaded = model_is_loaded()
     online = False
     if cfg.configured and probe:
         online = probe_provider(cfg)
+        loaded = model_is_loaded()
     elif cfg.configured and not probe:
+        # "online" means the model file is available for generation (may still
+        # need a cold load after idle unload). Use ``loaded`` for RAM state.
         online = True
     return {
         "provider": "local",
@@ -419,6 +611,7 @@ def model_status(*, probe: bool = False) -> dict[str, Any]:
         "model_path": str(cfg.model_path),
         "configured": cfg.configured,
         "online": online,
+        "loaded": loaded,
         "temperature": cfg.temperature,
         "n_ctx": cfg.n_ctx,
         "n_threads": cfg.n_threads,
@@ -445,6 +638,7 @@ def compose_midi_json(
     user_prompt: str,
     seed: int | None = None,
     config: AIConfig | None = None,
+    client_request_id: str | None = None,
 ) -> dict[str, Any]:
     cfg = config or get_ai_config()
     if not cfg.configured:
@@ -455,96 +649,116 @@ def compose_midi_json(
         )
 
     _log_step("Starting AI composition (local Qwen) — single call...")
-    llm = _get_llm(cfg)
-    # Empty {} was caused by json_object grammar; use free generation + JSON prefill
-    temperature = 0.2 if seed is not None else max(0.2, float(cfg.temperature))
-
-    system = (
-        system_prompt
-        + "\n\nCRITICAL: Include \"tracks\": [ ... ] with at least one note. "
-        "Never return {}."
-    )
-    user = f"{user_prompt}\n\n/no_think"
-    prompt, prefill = _build_qwen_completion_prompt(system, user)
-
-    create_kwargs: dict[str, Any] = {
-        "prompt": prompt,
-        "temperature": temperature,
-        "max_tokens": cfg.max_tokens,
-        "stop": ["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
-    }
-    if seed is not None:
-        create_kwargs["seed"] = int(seed)
-
-    _log_step(
-        f"Model generating JSON (max_tokens={cfg.max_tokens}, "
-        f"temp={temperature}, prefill=on) — please wait..."
-    )
-    started = time.perf_counter()
+    global _in_flight
+    generation_id = begin_generation(client_request_id)
+    with _llm_lock:
+        _cancel_idle_timer_locked()
+        _in_flight += 1
     try:
-        # Serialize inference: llama.cpp models are not generally thread-safe.
-        with _llm_lock:
-            try:
-                response = llm.create_completion(**create_kwargs)
-            except Exception as exc:  # noqa: BLE001
-                if seed is not None and "seed" in str(exc).lower():
-                    create_kwargs.pop("seed", None)
+        _raise_if_cancelled(generation_id)
+        llm = _get_llm(cfg)
+        _raise_if_cancelled(generation_id)
+        # Respect AI_TEMPERATURE even when a seed is set for reproducibility.
+        temperature = max(0.0, float(cfg.temperature))
+
+        system = (
+            system_prompt
+            + "\n\nCRITICAL: Include \"tracks\": [ ... ] with at least one note. "
+            "Never return {}."
+        )
+        user = f"{user_prompt}\n\n/no_think"
+        prompt, prefill = _build_qwen_completion_prompt(system, user)
+
+        create_kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "temperature": temperature,
+            "max_tokens": cfg.max_tokens,
+            "stop": ["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
+        }
+        if seed is not None:
+            create_kwargs["seed"] = int(seed)
+
+        _log_step(
+            f"Model generating JSON (max_tokens={cfg.max_tokens}, "
+            f"temp={temperature}, prefill=on) — please wait..."
+        )
+        started = time.perf_counter()
+        _raise_if_cancelled(generation_id)
+        try:
+            # Serialize inference: llama.cpp models are not generally thread-safe.
+            with _llm_lock:
+                try:
                     response = llm.create_completion(**create_kwargs)
-                else:
-                    raise AIMusicError(
-                        f"Local model request failed: {exc}"
-                    ) from exc
-    except AIMusicError:
-        raise
+                except Exception as exc:  # noqa: BLE001
+                    if seed is not None and "seed" in str(exc).lower():
+                        create_kwargs.pop("seed", None)
+                        response = llm.create_completion(**create_kwargs)
+                    else:
+                        raise AIMusicError(
+                            f"Local model request failed: {exc}"
+                        ) from exc
+        except AIMusicError:
+            raise
 
-    elapsed = time.perf_counter() - started
-    try:
-        continuation = response["choices"][0]["text"] or ""
-    except (KeyError, IndexError, TypeError) as exc:
-        raise AIMusicError("Local model returned unexpected response shape") from exc
+        _raise_if_cancelled(generation_id)
+        elapsed = time.perf_counter() - started
+        try:
+            continuation = response["choices"][0]["text"] or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIMusicError(
+                "Local model returned unexpected response shape"
+            ) from exc
 
-    content = prefill + continuation
-    if not content.strip() or content.strip() == "{}":
-        raise AIMusicError(
-            "Model returned empty JSON. Restart backend and try a shorter prompt."
+        content = prefill + continuation
+        if not content.strip() or content.strip() == "{}":
+            raise AIMusicError(
+                "Model returned empty JSON. Restart backend and try a shorter prompt."
+            )
+
+        _log_step(f"Model finished in {elapsed:.1f}s — parsing JSON...")
+        try:
+            debug_path = (
+                Path(__file__).resolve().parents[3]
+                / "generated"
+                / "_last_model_raw.json.txt"
+            )
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            debug_path.write_text(str(content)[:20000], encoding="utf-8")
+        except OSError:
+            pass
+
+        data = _extract_json(str(content))
+        _raise_if_cancelled(generation_id)
+
+        tracks = data.get("tracks")
+        if isinstance(tracks, list):
+            cleaned = []
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+                notes = track.get("notes")
+                if isinstance(notes, list) and notes:
+                    cleaned.append(track)
+            data["tracks"] = cleaned
+
+        tracks = data.get("tracks") if isinstance(data.get("tracks"), list) else []
+        if not tracks:
+            raise AIMusicError(
+                "Model JSON had no playable notes. Try a simpler prompt "
+                "(fewer bars / fewer tracks)."
+            )
+
+        note_count = sum(
+            len(t["notes"])
+            for t in tracks
+            if isinstance(t, dict) and isinstance(t.get("notes"), list)
         )
-
-    _log_step(f"Model finished in {elapsed:.1f}s — parsing JSON...")
-    try:
-        debug_path = (
-            Path(__file__).resolve().parents[3]
-            / "generated"
-            / "_last_model_raw.json.txt"
-        )
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_path.write_text(str(content)[:20000], encoding="utf-8")
-    except OSError:
-        pass
-
-    data = _extract_json(str(content))
-
-    tracks = data.get("tracks")
-    if isinstance(tracks, list):
-        cleaned = []
-        for track in tracks:
-            if not isinstance(track, dict):
-                continue
-            notes = track.get("notes")
-            if isinstance(notes, list) and notes:
-                cleaned.append(track)
-        data["tracks"] = cleaned
-
-    tracks = data.get("tracks") if isinstance(data.get("tracks"), list) else []
-    if not tracks:
-        raise AIMusicError(
-            "Model JSON had no playable notes. Try a simpler prompt "
-            "(fewer bars / fewer tracks)."
-        )
-
-    note_count = sum(
-        len(t["notes"])
-        for t in tracks
-        if isinstance(t, dict) and isinstance(t.get("notes"), list)
-    )
-    _log_step(f"JSON OK — tracks={len(tracks)}, notes={note_count}")
-    return data
+        _log_step(f"JSON OK — tracks={len(tracks)}, notes={note_count}")
+        return data
+    finally:
+        end_generation(generation_id, client_request_id)
+        with _llm_lock:
+            _in_flight = max(0, _in_flight - 1)
+            should_schedule = _in_flight == 0 and _llm is not None
+        if should_schedule:
+            _schedule_idle_unload()

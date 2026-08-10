@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from app.core.engine import MidiEngine, MidiTrack
 from app.core.instruments import is_drum_instrument
 
@@ -84,10 +86,16 @@ def apply_expression(
     Advanced numeric args customize the automation; defaults preserve legacy.
     """
     bar = _beats_per_bar(engine)
+    if not math.isfinite(bar) or bar <= 0:
+        raise ValueError(f"Invalid beats-per-bar for expression: {bar}")
     duration = max(engine.duration_beats(active_only=True), bar)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"Invalid expression duration: {duration}")
 
     sustain_on = max(0, min(127, int(sustain_on_value)))
     sustain_off = max(0, min(127, int(sustain_off_value)))
+    if sustain and sustain_on == sustain_off:
+        raise ValueError("sustain_on_value and sustain_off_value must differ")
     hold_ratio = max(0.05, min(1.0, float(sustain_hold_ratio)))
 
     mod_peak = max(0, min(127, int(modulation_value)))
@@ -107,6 +115,8 @@ def apply_expression(
 
         name = track.name.strip().lower()
         end = max(_track_end_beat(track), duration)
+        if not math.isfinite(end) or end <= 0:
+            continue
 
         # Sustain pedal: hold through most of each bar, lift slightly before next bar
         if sustain and (
@@ -115,7 +125,9 @@ def apply_expression(
         ):
             if not _has_cc(track, 64):
                 beat = 0.0
-                while beat < end - 1e-9:
+                max_steps = int(end / bar) + 4
+                steps = 0
+                while beat < end - 1e-9 and steps < max_steps:
                     on = beat
                     off = min(beat + bar * hold_ratio, end)
                     if off > on:
@@ -126,15 +138,20 @@ def apply_expression(
                             off_value=sustain_off,
                         )
                     beat += bar
+                    steps += 1
 
         # Modulation wheel (CC1) — expression accents on melody
         if modulation and name == "melody" and not _has_cc(track, 1):
             track.add_cc(1, 0, 0.0)
-            beat = bar * mod_interval
-            while beat < end:
+            step = bar * mod_interval
+            beat = step
+            max_steps = int(end / step) + 4 if step > 0 else 0
+            steps = 0
+            while beat < end and steps < max_steps:
                 track.add_cc(1, mod_peak, beat)
                 track.add_cc(1, 0, min(beat + bar * mod_accent, end))
-                beat += bar * mod_interval
+                beat += step
+                steps += 1
 
         # Pitch bend: always write center at t=0 so PB data exists in file;
         # scoops on lead/synth melody phrases
@@ -146,10 +163,14 @@ def apply_expression(
                 or "synth" in track.instrument
                 or track.instrument in {"lead_1_square", "lead_2_sawtooth"}
             ):
+                step = bar * pb_interval
                 beat = 0.0
-                while beat < end:
+                max_steps = int(end / step) + 4 if step > 0 else 0
+                steps = 0
+                while beat < end and steps < max_steps:
                     track.add_pitch_bend(PITCH_BEND_CENTER - pb_depth, beat)
                     track.add_pitch_bend(
                         PITCH_BEND_CENTER, min(beat + pb_scoop, end)
                     )
-                    beat += bar * pb_interval
+                    beat += step
+                    steps += 1

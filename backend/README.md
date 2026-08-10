@@ -71,11 +71,12 @@ the old “next free port” behaviour (then update the frontend URL to match).
 | Variable             | Required | Description                                      |
 | -------------------- | -------- | ------------------------------------------------ |
 | `LOCAL_MODEL_PATH`   | No       | Override path to `.gguf` (default under `models/`) |
-| `AI_TEMPERATURE`     | No       | Default `0.3` (inference floor `0.2`; seed → `0.2`) |
+| `AI_TEMPERATURE`     | No       | Default `0.3` (clamped ≥ 0; seed does not override) |
 | `AI_MAX_TOKENS`      | No       | Default `3072`                                   |
 | `LOCAL_N_CTX`        | No       | Context size, default `4096`                     |
 | `LOCAL_N_THREADS`    | No       | CPU threads (default CPU count − 1)              |
 | `LOCAL_N_GPU_LAYERS` | No       | GPU layers (`0` = CPU only)                      |
+| `MODEL_IDLE_UNLOAD_SECONDS` | No | Idle unload after last use (default `120`; min 5) |
 | `PORT_FALLBACK`      | No       | `1` = auto-pick next free port when busy         |
 | `CORS_ORIGINS`       | No       | Extra origins for deploy                         |
 | `CORS_ORIGIN_REGEX`  | No       | Override or disable default LAN regex            |
@@ -87,9 +88,10 @@ See `.env.example` for a full template.
 
 | Method | Path                     | AI  | Description |
 | ------ | ------------------------ | --- | ----------- |
-| `GET`  | `/health`                | —   | Status, version, AI configured flag (`?probe=1` checks GGUF) |
+| `GET`  | `/health`                | —   | Status, version, AI status (`?probe=1` checks GGUF; includes `loaded`) |
 | `POST` | `/generate/text`         | Yes | Prompt → MIDI file download |
 | `POST` | `/generate/text/preview` | Yes | Same generation, JSON metadata only |
+| `POST` | `/generate/cancel`       | —   | Abort in-flight local GGUF compose (`{"cancelled": true}`; generate may return 499) |
 | `POST` | `/parse/text`            | No  | Heuristic parse of prompt fields |
 | `POST` | `/generate/chords`       | No  | Exact progression → MIDI file |
 | `POST` | `/generate/notes`        | No  | Note lines → MIDI file |

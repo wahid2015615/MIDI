@@ -75,5 +75,5 @@ def generate_chords(body: ChordGenerateRequest):
             body.file_type,
             duplicate_score_meta=body.duplicate_score_meta,
         )
-    except (AIMusicError, ValueError, HTTPException) as exc:
+    except (AIMusicError, ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)

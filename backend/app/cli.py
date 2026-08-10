@@ -16,13 +16,13 @@ def main(argv: list[str] | None = None) -> None:
 
     p_text = sub.add_parser("text", help="Generate MIDI from a text prompt")
     p_text.add_argument("prompt", type=str)
-    p_text.add_argument("-o", "--output", default="samples/text.mid")
+    p_text.add_argument("-o", "--output", default="samples/text_output.mid")
     p_text.add_argument("--type", dest="file_type", type=int, choices=[0, 1], default=1)
     p_text.add_argument("--seed", type=int, default=42)
 
     p_chords = sub.add_parser("chords", help="Generate MIDI from a chord progression")
     p_chords.add_argument("progression", type=str)
-    p_chords.add_argument("-o", "--output", default="samples/chords.mid")
+    p_chords.add_argument("-o", "--output", default="samples/chords_output.mid")
     p_chords.add_argument("--bpm", type=float, default=120)
     p_chords.add_argument("--melody", action="store_true", default=True)
     p_chords.add_argument("--no-melody", action="store_false", dest="melody")
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p_notes = sub.add_parser("notes", help="Generate MIDI from a notes file")
     p_notes.add_argument("file", type=str)
-    p_notes.add_argument("-o", "--output", default="samples/notes.mid")
+    p_notes.add_argument("-o", "--output", default="samples/notes_output.mid")
     p_notes.add_argument("--bpm", type=float, default=120)
     p_notes.add_argument("--instrument", default="acoustic_grand_piano")
     p_notes.add_argument("--type", dest="file_type", type=int, choices=[0, 1], default=1)

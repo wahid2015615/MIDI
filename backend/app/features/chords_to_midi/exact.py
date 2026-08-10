@@ -82,7 +82,12 @@ def build_exact_chords_engine(
 
     ts = normalize_time_signature(*time_signature)
     beats_per_bar = _beats_per_bar(ts[0], ts[1])
-    chord_beats = max(0.25, float(bars_per_chord) * beats_per_bar)
+    chord_beats = float(bars_per_chord) * beats_per_bar
+    if chord_beats < 0.05:
+        raise ValueError(
+            f"bars_per_chord={bars_per_chord:g} yields only {chord_beats:g} beats "
+            f"in {ts[0]}/{ts[1]}; increase bars_per_chord (minimum usable ~0.05 beats)"
+        )
 
     engine = MidiEngine(
         bpm=bpm,

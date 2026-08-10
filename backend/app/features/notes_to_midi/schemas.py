@@ -9,6 +9,7 @@ from app.shared.schemas import (
     TimeSignatureOptions,
     TimingOptions,
     TrackMixOptions,
+    coerce_http_bpm,
 )
 
 
@@ -48,7 +49,12 @@ class NotesGenerateRequest(BaseModel):
         ),
     )
     seed: int | None = 42
-    filename: str = "notes.mid"
+    filename: str = "notes_output.mid"
+
+    @field_validator("bpm", mode="before")
+    @classmethod
+    def _coerce_bpm(cls, value: object) -> object:
+        return coerce_http_bpm(value)
 
     @field_validator("notes")
     @classmethod

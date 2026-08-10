@@ -133,7 +133,7 @@ def humanize_track(
     timing_beats: float = 0.02,
     velocity_jitter: int = 8,
     duration_beats: float = 0.01,
-    controllers: bool = True,
+    controllers: bool = False,
     seed: int | None = None,
 ) -> None:
     """Humanize note starts, durations, velocities, and optionally CC/pitch-bend times."""

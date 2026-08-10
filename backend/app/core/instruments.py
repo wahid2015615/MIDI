@@ -79,28 +79,35 @@ ALIASES: dict[str, str] = {
 DRUM_CHANNEL = 9  # 0-based MIDI channel 10
 
 
-def get_program(name: str) -> int:
-    """Resolve an instrument name (or alias) to a GM program number."""
-    key = name.strip().lower().replace("-", " ").replace(" ", "_")
-    spaced = name.strip().lower().replace("_", " ").replace("-", " ")
+def resolve_instrument_slug(name: str) -> str:
+    """Return a canonical GM slug (or digit program string); raise if unknown."""
+    raw = name.strip()
+    key = raw.lower().replace("-", " ").replace(" ", "_")
+    spaced = raw.lower().replace("_", " ").replace("-", " ")
 
     if key in GM_INSTRUMENTS:
-        return GM_INSTRUMENTS[key]
+        return key
     if spaced in ALIASES:
-        return GM_INSTRUMENTS[ALIASES[spaced]]
+        return ALIASES[spaced]
     if key in ALIASES:
-        return GM_INSTRUMENTS[ALIASES[key]]
-
-    # Direct numeric program
-    if name.strip().isdigit():
-        value = int(name.strip())
+        return ALIASES[key]
+    if raw.isdigit():
+        value = int(raw)
         if 0 <= value <= 127:
-            return value
+            return raw
 
     raise ValueError(
         f"Unknown instrument '{name}'. "
         f"Try one of: {', '.join(sorted(set(ALIASES) | set(GM_INSTRUMENTS)))}"
     )
+
+
+def get_program(name: str) -> int:
+    """Resolve an instrument name (or alias) to a GM program number."""
+    slug = resolve_instrument_slug(name)
+    if slug.isdigit():
+        return int(slug)
+    return GM_INSTRUMENTS[slug]
 
 
 def is_drum_instrument(name: str) -> bool:

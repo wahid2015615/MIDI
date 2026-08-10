@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.engine import (
     TS_NUMERATOR_MAX,
@@ -12,11 +12,43 @@ from app.core.engine import (
 )
 
 
+def coerce_http_bpm(value: object) -> object:
+    """Map cleared/non-positive BPM to 120 before Field ge=BPM_MIN checks."""
+    if value is None:
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return value
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError("BPM must be finite")
+    if number <= 0:
+        return 120.0
+    return number
+
+
 class TrackOptions(BaseModel):
     melody: bool = True
     chords: bool = True
     bass: bool = True
     drums: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _partial_object_defaults_false(cls, data: object) -> object:
+        """When a tracks object is sent, omitted roles default to False (not True).
+
+        Avoids ``{"melody": true}`` accidentally keeping chords+bass enabled.
+        """
+        if isinstance(data, dict) and data:
+            known = ("melody", "chords", "bass", "drums")
+            if any(k in data for k in known):
+                merged = dict(data)
+                for key in known:
+                    if key not in merged:
+                        merged[key] = False
+                return merged
+        return data
 
 
 class TrackMixOptions(BaseModel):
@@ -54,7 +86,12 @@ class TrackMixOptions(BaseModel):
 
 
 class TimingOptions(BaseModel):
-    quantize: str | None = Field(default="1/16", examples=["1/16", "1/8", None])
+    quantize: str | None = Field(
+        default=None,
+        examples=["1/16", "1/8", None],
+        description="Snap note starts (and optionally durations) to this grid. "
+        "None / omitted = no quantize. Empty timing objects do not imply 1/16.",
+    )
     quantize_duration: bool = Field(
         default=True,
         description="When quantizing, also snap note durations to the grid",
@@ -180,6 +217,15 @@ class ExpressionOptions(BaseModel):
         le=4.0,
         description="Duration of the scoop back to center, in beats",
     )
+
+    @model_validator(mode="after")
+    def _sustain_on_off_distinct(self) -> ExpressionOptions:
+        if self.sustain and self.sustain_on_value == self.sustain_off_value:
+            raise ValueError(
+                "sustain_on_value and sustain_off_value must differ "
+                "so pedal on/off pairs can be preserved under timing"
+            )
+        return self
 
 
 FileType = Literal[0, 1]

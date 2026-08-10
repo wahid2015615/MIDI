@@ -30,7 +30,7 @@ Use the same host and port printed when the backend starts.
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3001](http://localhost:3001).
 
 From the repo root on Windows: `start-frontend.bat`.
 
@@ -38,9 +38,9 @@ From the repo root on Windows: `start-frontend.bat`.
 
 | Command         | Description              |
 | --------------- | ------------------------ |
-| `npm run dev`   | Dev server (Turbopack)   |
+| `npm run dev`   | Dev server on **:3001** (Turbopack) |
 | `npm run build` | Production build         |
-| `npm run start` | Serve production build   |
+| `npm run start` | Serve production on **:3001** |
 | `npm run lint`  | ESLint                   |
 
 ## Features
@@ -71,10 +71,13 @@ For same-tick chord stacks in Notes/Chords `.mid` output, leave **Humanize** off
 | Endpoint | Purpose |
 | -------- | ------- |
 | `POST /generate/text\|chords\|notes` | Generate and download `.mid` |
+| `POST /generate/cancel` | Abort in-flight Text (GGUF) generation |
 | `POST /parse/text` | Auto-fill detected prompt fields (text mode) |
 | `GET /health?probe=1` | API + local model status |
 | `GET /meta/instruments` | Instrument dropdowns |
 | `GET /meta/styles` | Style / mood / grid catalogs |
+
+`resolveApiBase()` rewrites `127.0.0.1` in `NEXT_PUBLIC_API_URL` to the page hostname when the Studio is opened via LAN (e.g. `http://192.168.x.x:3001`).
 
 Not called by the current UI (REST still available):
 

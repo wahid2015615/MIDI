@@ -21,6 +21,22 @@ def _repair_dash_fragments(parts: list[str]) -> list[str]:
     return repaired
 
 
+def _expand_mixed_separators(parts: list[str]) -> list[str]:
+    """After a primary split, also split leftover spaced dashes / commas."""
+    expanded: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if not text:
+            continue
+        if re.search(r"\s-\s", text):
+            expanded.extend(re.split(r"\s+-\s+", text))
+        elif "," in text:
+            expanded.extend(text.split(","))
+        else:
+            expanded.append(text)
+    return expanded
+
+
 def parse_progression_string(text: str) -> list[str]:
     """Split a progression string into chord tokens (no validation).
 
@@ -31,14 +47,17 @@ def parse_progression_string(text: str) -> list[str]:
          spaced (``C-7 - F-7``) or repaired after unspaced splits.
       ,  comma         e.g. C, G, Am, F
       whitespace / newlines  e.g. C G Am F  or one chord per line
+
+    Mixed separators after a primary ``|`` split (e.g. ``C | G - Am | F``)
+    are also expanded so inner spaced dashes / commas become separate chords.
     """
     text = text.replace("→", "->")
     text = text.replace("–", "-").replace("—", "-")
 
     if "|" in text:
-        raw_parts = text.split("|")
+        raw_parts = _expand_mixed_separators(text.split("|"))
     elif "->" in text:
-        raw_parts = re.split(r"\s*->\s*", text)
+        raw_parts = _expand_mixed_separators(re.split(r"\s*->\s*", text))
     elif re.search(r"\s-\s", text):
         # Spaced dashes: safe for jazz C-7 - F-7
         raw_parts = re.split(r"\s+-\s+", text)

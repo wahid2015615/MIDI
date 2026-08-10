@@ -12,8 +12,9 @@ def raise_generate_http(exc: BaseException) -> None:
     if isinstance(exc, HTTPException):
         raise exc
     if isinstance(exc, AIMusicError):
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if isinstance(exc, ValueError):
+        status = 499 if "cancelled" in str(exc).lower() else 503
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    if isinstance(exc, (ValueError, OverflowError)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Unexpected: let FastAPI return 500 with traceback in logs
     raise exc

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
-from app.core.engine import MidiEngine, clamp_bpm, normalize_time_signature
+from app.core.engine import BEAT_TIME_MAX, MidiEngine, clamp_bpm, normalize_time_signature
 from app.core.theory import note_name_to_midi
 
 logger = logging.getLogger(__name__)
@@ -176,11 +177,24 @@ def composition_to_engine(data: dict[str, Any]) -> MidiEngine:
             except (TypeError, ValueError) as exc:
                 skipped_notes.append(f"{name}: {note!r} ({exc})")
                 continue
+            if not math.isfinite(start) or not math.isfinite(dur):
+                skipped_notes.append(f"{name}: non-finite timing {note!r}")
+                continue
             if dur <= 0:
                 skipped_notes.append(f"{name}: non-positive duration {note!r}")
                 continue
+            if start < 0:
+                skipped_notes.append(f"{name}: negative start {note!r}")
+                continue
+            if start > BEAT_TIME_MAX or dur > BEAT_TIME_MAX:
+                skipped_notes.append(f"{name}: beat time too large {note!r}")
+                continue
             vel = min(127, max(1, vel))
-            track.add_note(pitch, max(0.0, start), dur, vel)
+            try:
+                track.add_note(pitch, start, dur, vel)
+            except ValueError as exc:
+                skipped_notes.append(f"{name}: {note!r} ({exc})")
+                continue
             notes_added += 1
             track_added += 1
 
