@@ -3,7 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.features.chords_to_midi.schemas import ChordGenerateRequest
-from app.features.generation.ai_client import AIMusicError
 from app.features.generation.service import generate_from_chords
 from app.shared.http_errors import raise_generate_http
 from app.shared.midi_response import (
@@ -75,5 +74,5 @@ def generate_chords(body: ChordGenerateRequest):
             body.file_type,
             duplicate_score_meta=body.duplicate_score_meta,
         )
-    except (AIMusicError, ValueError, OverflowError, HTTPException) as exc:
+    except (ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)

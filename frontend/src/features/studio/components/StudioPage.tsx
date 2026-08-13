@@ -31,7 +31,6 @@ import {
   defaultFilenameForMode,
   isDrumInstrument,
   isValidBars,
-  isValidMood,
   isValidStyle,
   isValidTimeSignature,
   KEYS,
@@ -46,8 +45,6 @@ import {
   TS_DENOMINATORS,
   TS_NUMERATOR_MAX,
   TS_NUMERATOR_MIN,
-  type Mood,
-  type Style,
   type TsDenominator,
 } from "../constants";
 import type { Mode, TrackRole } from "../types";
@@ -150,13 +147,13 @@ function estimateNotesBars(notesText: string, beatsPerBar: number): number {
     if (lower === "r" || lower.startsWith("rest") || lower.startsWith("r ")) {
       const durTok = parts.slice(1).join(" ").toLowerCase() || "quarter";
       const first = durTok.split(/\s+/)[0] || "quarter";
-      beats = tokenBeats[first] ?? Number(first) || 1;
+      beats = (tokenBeats[first] ?? Number(first)) || 1;
     } else {
       // duration is after pitches
       let i = 0;
       while (i < parts.length && /^[A-Ga-g]/.test(parts[i])) i += 1;
       const durTok = (parts[i] || "q").toLowerCase();
-      beats = tokenBeats[durTok] ?? Number(durTok) || 1;
+      beats = (tokenBeats[durTok] ?? Number(durTok)) || 1;
     }
     if (!Number.isFinite(beats) || beats <= 0) beats = 1;
     perTrack.set(current, (perTrack.get(current) || 0) + beats);
@@ -226,11 +223,27 @@ export default function StudioPage() {
   const [tsDenominator, setTsDenominator] = useState<TsDenominator>(
     DEFAULT_TIME_SIGNATURE.denominator,
   );
-  const [mood, setMood] = useState<Mood>(DEFAULT_MOOD);
-  const [style, setStyle] = useState<Style>(DEFAULT_STYLE);
+  const [moodOptions, setMoodOptions] = useState<string[]>([...MOODS]);
+  const [styleOptions, setStyleOptions] = useState<string[]>([...STYLES]);
+  const [quantizeOptions, setQuantizeOptions] = useState<string[]>([
+    "1/4",
+    "1/8",
+    "1/16",
+    "1/32",
+  ]);
+  const [swingGridOptions, setSwingGridOptions] = useState<string[]>([
+    "1/4",
+    "1/8",
+    "1/16",
+    "1/32",
+  ]);
+  const [ppqOptions, setPpqOptions] = useState<number[]>([
+    96, 192, 240, 384, 480, 960, 1920,
+  ]);
+  const [mood, setMood] = useState<string>(DEFAULT_MOOD);
+  const [style, setStyle] = useState<string>(DEFAULT_STYLE);
   const [fileType, setFileType] = useState<0 | 1>(1);
-  const [duplicateScoreMeta, setDuplicateScoreMeta] = useState(false);
-  const [filename, setFilename] = useState(DEFAULT_FILENAME_BY_MODE.text);
+  const [filename, setFilename] = useState<string>(DEFAULT_FILENAME_BY_MODE.text);
   /** When false, switching Text/Chords/Notes can refresh a stock default name. */
   const filenameCustomRef = useRef(false);
 
@@ -399,9 +412,28 @@ export default function StudioPage() {
       try {
         const meta = await fetchMeta();
         if (!alive) return;
+        setApiDisplayBase(meta.apiBase || resolveApiBase());
         if (meta.instruments?.instruments?.length) {
           setInstrumentOptions(
             meta.instruments.instruments.map((i: { id: string }) => i.id),
+          );
+        }
+        const stylesMeta = meta.styles;
+        if (stylesMeta?.moods?.length) {
+          setMoodOptions(stylesMeta.moods.map(String));
+        }
+        if (stylesMeta?.styles?.length) {
+          setStyleOptions(stylesMeta.styles.map(String));
+        }
+        if (stylesMeta?.quantize_grids?.length) {
+          setQuantizeOptions(stylesMeta.quantize_grids.map(String));
+        }
+        if (stylesMeta?.swing_grids?.length) {
+          setSwingGridOptions(stylesMeta.swing_grids.map(String));
+        }
+        if (stylesMeta?.ppq_options?.length) {
+          setPpqOptions(
+            stylesMeta.ppq_options.map(Number).filter((n) => Number.isFinite(n)),
           );
         }
       } catch {
@@ -439,11 +471,11 @@ export default function StudioPage() {
     const trimmed = prompt.trim();
     if (!trimmed) return;
 
-    let cancelled = false;
+    const abort = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
-        const parsed = await parseTextPrompt(trimmed);
-        if (cancelled) return;
+        const parsed = await parseTextPrompt(trimmed, { signal: abort.signal });
+        if (abort.signal.aborted) return;
         const d = parsed.detected ?? {
           bars: true,
           bpm: true,
@@ -483,17 +515,26 @@ export default function StudioPage() {
           setKey(parsed.key);
         }
         if (d.mood && isUntouched("mood") && parsed.mood) {
-          try {
-            setMood(normalizeMood(parsed.mood));
-          } catch {
-            /* ignore unknown mood from parse */
+          const match = moodOptions.find(
+            (m) => m.toLowerCase() === parsed.mood.trim().toLowerCase(),
+          );
+          if (match) setMood(match);
+          else {
+            try {
+              setMood(normalizeMood(parsed.mood));
+            } catch {
+              /* ignore unknown mood from parse */
+            }
           }
         }
         if (d.style && isUntouched("style") && parsed.style) {
           try {
             setStyle(normalizeStyle(parsed.style));
           } catch {
-            /* ignore unknown style from parse */
+            const match = styleOptions.find(
+              (s) => s.toLowerCase() === parsed.style.trim().toLowerCase(),
+            );
+            if (match) setStyle(match);
           }
         }
         if (d.instrument && isUntouched("instrument") && parsed.instrument) {
@@ -517,15 +558,16 @@ export default function StudioPage() {
           setTracks((t) => ({ ...t, drums: parsed.include_drums }));
         }
       } catch (err) {
+        if (isAbortError(err)) return;
         console.warn("[studio] prompt auto-fill failed:", err);
       }
     }, 400);
 
     return () => {
-      cancelled = true;
+      abort.abort();
       window.clearTimeout(timer);
     };
-  }, [prompt, mode, isUntouched]);
+  }, [prompt, mode, isUntouched, moodOptions, styleOptions]);
 
   const notesTrackRoles = useMemo(() => {
     const roles = new Set<TrackRole>();
@@ -743,21 +785,41 @@ export default function StudioPage() {
     }
     const safeBars = mode === "text" ? normalizeBars(bars) : bars;
     if (mode === "text") {
-      if (!isValidMood(mood)) {
+      if (!moodOptions.some((m) => m.toLowerCase() === mood.trim().toLowerCase())) {
         setError(
-          `Unsupported mood "${mood}". Allowed values: ${MOODS.join(", ")}`,
+          `Unsupported mood "${mood}". Allowed values: ${moodOptions.join(", ")}`,
         );
         return;
       }
-      if (!isValidStyle(style)) {
+      if (
+        !styleOptions.some((s) => s.toLowerCase() === style.trim().toLowerCase()) &&
+        !isValidStyle(style)
+      ) {
         setError(
-          `Unsupported style "${style}". Allowed values: ${STYLES.join(", ")}`,
+          `Unsupported style "${style}". Allowed values: ${styleOptions.join(", ")}`,
         );
         return;
       }
     }
-    const safeMood = mode === "text" ? normalizeMood(mood) : mood;
-    const safeStyle = mode === "text" ? normalizeStyle(style) : style;
+    const safeMood =
+      mode === "text"
+        ? moodOptions.find((m) => m.toLowerCase() === mood.trim().toLowerCase()) ||
+          normalizeMood(mood)
+        : mood;
+    const safeStyle =
+      mode === "text"
+        ? (() => {
+            try {
+              return normalizeStyle(style);
+            } catch {
+              return (
+                styleOptions.find(
+                  (s) => s.toLowerCase() === style.trim().toLowerCase(),
+                ) || style
+              );
+            }
+          })()
+        : style;
     if (!isValidTimeSignature(tsNumerator, tsDenominator)) {
       setError(
         `Invalid time signature ${tsNumerator}/${tsDenominator}. ` +
@@ -856,7 +918,6 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            duplicate_score_meta: duplicateScoreMeta,
             filename: filename.trim() || defaultFilenameForMode("text"),
             seed,
             client_request_id: clientRequestId,
@@ -880,7 +941,6 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            duplicate_score_meta: duplicateScoreMeta,
             filename: filename.trim() || defaultFilenameForMode("chords"),
             seed,
           },
@@ -898,7 +958,6 @@ export default function StudioPage() {
             timing,
             expression,
             file_type: fileType,
-            duplicate_score_meta: duplicateScoreMeta,
             filename: filename.trim() || defaultFilenameForMode("notes"),
             seed,
           },
@@ -1028,7 +1087,11 @@ export default function StudioPage() {
               <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-[var(--muted)]">
                 01 · Compose
               </h2>
-              <div className="flex rounded-xl bg-[var(--glow)] p-1">
+              <div
+                className="flex rounded-xl bg-[var(--glow)] p-1"
+                role="radiogroup"
+                aria-label="Generation mode"
+              >
                 {(
                   [
                     ["text", "Text"],
@@ -1039,6 +1102,8 @@ export default function StudioPage() {
                   <button
                     key={id}
                     type="button"
+                    role="radio"
+                    aria-checked={mode === id}
                     onClick={() => setModeAndMaybeFilename(id)}
                     className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
                       mode === id
@@ -1061,6 +1126,7 @@ export default function StudioPage() {
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   rows={3}
+                  maxLength={8000}
                   className="field-input resize-y"
                   placeholder="Make a sad violin melody in A Minor, 90 BPM, 8 bars, cinematic mood."
                   required
@@ -1164,7 +1230,14 @@ export default function StudioPage() {
                   />
                 </Field>
               )}
-              <Field label="Seed" hint="Reproducible AI">
+              <Field
+                label="Seed"
+                hint={
+                  mode === "text"
+                    ? "Reproducible AI"
+                    : "Humanize RNG (optional)"
+                }
+              >
                 <div className="flex gap-2">
                   <input
                     type="number"
@@ -1246,11 +1319,11 @@ export default function StudioPage() {
                       value={mood}
                       onChange={(e) => {
                         markTouched("mood");
-                        setMood(e.target.value as Mood);
+                        setMood(e.target.value);
                       }}
                       className="field-input"
                     >
-                      {MOODS.map((m) => (
+                      {moodOptions.map((m) => (
                         <option key={m} value={m}>
                           {m}
                         </option>
@@ -1262,11 +1335,11 @@ export default function StudioPage() {
                       value={style}
                       onChange={(e) => {
                         markTouched("style");
-                        setStyle(e.target.value as Style);
+                        setStyle(e.target.value);
                       }}
                       className="field-input"
                     >
-                      {STYLES.map((s) => (
+                      {styleOptions.map((s) => (
                         <option key={s} value={s}>
                           {s}
                         </option>
@@ -1285,21 +1358,6 @@ export default function StudioPage() {
                   <option value={0}>Type 0 · single track</option>
                 </select>
               </Field>
-              {fileType === 1 && (
-                <label className="flex items-start gap-2 text-xs text-[var(--muted)] sm:col-span-2">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={duplicateScoreMeta}
-                    onChange={(e) => setDuplicateScoreMeta(e.target.checked)}
-                  />
-                  <span>
-                    Duplicate tempo/time/key meta on every Type&nbsp;1 note track
-                    (helps some web MIDI players). Default keeps conductor-only
-                    SMF meta.
-                  </span>
-                </label>
-              )}
               <Field label="Filename">
                 <input
                   value={filename}
@@ -1482,6 +1540,7 @@ export default function StudioPage() {
                                 type="checkbox"
                                 checked={mute[id]}
                                 disabled={inactive}
+                                aria-label={`Mute ${label}`}
                                 onChange={(e) =>
                                   setMute((m) => ({
                                     ...m,
@@ -1496,6 +1555,7 @@ export default function StudioPage() {
                                 type="checkbox"
                                 checked={solo[id]}
                                 disabled={inactive}
+                                aria-label={`Solo ${label}`}
                                 onChange={(e) =>
                                   setSolo((s) => ({
                                     ...s,
@@ -1569,13 +1629,11 @@ export default function StudioPage() {
                   onChange={(e) => setPpq(Number(e.target.value))}
                   className="field-input"
                 >
-                  <option value={96}>96</option>
-                  <option value={192}>192</option>
-                  <option value={240}>240</option>
-                  <option value={384}>384</option>
-                  <option value={480}>480 default</option>
-                  <option value={960}>960</option>
-                  <option value={1920}>1920</option>
+                  {ppqOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value === 480 ? "480 default" : value}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field label="Quantize">
@@ -1585,10 +1643,11 @@ export default function StudioPage() {
                   className="field-input"
                 >
                   <option value="">Off</option>
-                  <option value="1/4">1/4</option>
-                  <option value="1/8">1/8</option>
-                  <option value="1/16">1/16</option>
-                  <option value="1/32">1/32</option>
+                  {quantizeOptions.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field label="Swing grid">
@@ -1597,10 +1656,11 @@ export default function StudioPage() {
                   onChange={(e) => setSwingGrid(e.target.value)}
                   className="field-input"
                 >
-                  <option value="1/4">1/4</option>
-                  <option value="1/8">1/8</option>
-                  <option value="1/16">1/16</option>
-                  <option value="1/32">1/32</option>
+                  {swingGridOptions.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field
@@ -1660,7 +1720,7 @@ export default function StudioPage() {
                   <input
                     type="range"
                     min={0}
-                    max={0.12}
+                    max={0.25}
                     step={0.005}
                     value={humanizeTiming}
                     onChange={(e) => setHumanizeTiming(Number(e.target.value))}
@@ -1671,7 +1731,7 @@ export default function StudioPage() {
                   <input
                     type="range"
                     min={0}
-                    max={32}
+                    max={64}
                     step={1}
                     value={humanizeVelocity}
                     onChange={(e) => setHumanizeVelocity(Number(e.target.value))}
@@ -1682,7 +1742,7 @@ export default function StudioPage() {
                   <input
                     type="range"
                     min={0}
-                    max={0.12}
+                    max={0.25}
                     step={0.005}
                     value={humanizeDuration}
                     onChange={(e) => setHumanizeDuration(Number(e.target.value))}
@@ -1795,7 +1855,7 @@ export default function StudioPage() {
                     <input
                       type="range"
                       min={0.25}
-                      max={8}
+                      max={32}
                       step={0.25}
                       value={modulationIntervalBars}
                       disabled={!modulation}
@@ -1811,7 +1871,7 @@ export default function StudioPage() {
                     <input
                       type="range"
                       min={0.05}
-                      max={2}
+                      max={4}
                       step={0.05}
                       value={modulationAccentRatio}
                       disabled={!modulation}
@@ -1830,7 +1890,7 @@ export default function StudioPage() {
                     <input
                       type="range"
                       min={0}
-                      max={2000}
+                      max={8191}
                       step={25}
                       value={pitchBendScoopDepth}
                       disabled={!pitchBend}
@@ -1844,7 +1904,7 @@ export default function StudioPage() {
                     <input
                       type="range"
                       min={0.25}
-                      max={16}
+                      max={32}
                       step={0.25}
                       value={pitchBendIntervalBars}
                       disabled={!pitchBend}
@@ -1860,7 +1920,7 @@ export default function StudioPage() {
                     <input
                       type="range"
                       min={0.05}
-                      max={2}
+                      max={4}
                       step={0.05}
                       value={pitchBendScoopBeats}
                       disabled={!pitchBend}
@@ -1924,12 +1984,20 @@ export default function StudioPage() {
           </div>
 
           {error && (
-            <p className="rounded-xl border border-[#f3c1bc] bg-[#fdecea] px-4 py-3 text-sm text-[var(--danger)]">
+            <p
+              role="alert"
+              aria-live="assertive"
+              className="rounded-xl border border-[#f3c1bc] bg-[#fdecea] px-4 py-3 text-sm text-[var(--danger)]"
+            >
               {error}
             </p>
           )}
           {success && (
-            <p className="rounded-xl border border-[#b7e4c7] bg-[#e8f8ef] px-4 py-3 text-sm text-[var(--ok)]">
+            <p
+              role="status"
+              aria-live="polite"
+              className="rounded-xl border border-[#b7e4c7] bg-[#e8f8ef] px-4 py-3 text-sm text-[var(--ok)]"
+            >
               {success}
             </p>
           )}

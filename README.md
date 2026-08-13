@@ -153,6 +153,8 @@ On Windows: `start-frontend.bat` from the repo root.
 | `PORT_FALLBACK`       | Auto next free port if busy (`1` = yes)    | `0` (fail hard)              |
 | `CORS_ORIGINS`        | Extra allowed frontend origins             | _(localhost defaults)_       |
 | `CORS_ORIGIN_REGEX`   | Override/disable default LAN regex         | _(private LAN allowed)_      |
+| `MIDIGEN_API_TOKEN`   | Optional token for text generate + probe   | _(unset)_                    |
+| `GENERATED_ARCHIVE_MAX` | Max archived `.mid` files under generated/ | `200`                      |
 | `UVICORN_RELOAD`      | Auto-reload on code changes                | `0`                          |
 
 See `backend/.env.example` for a full template.
@@ -210,9 +212,13 @@ Outputs land in `backend/samples/`. Text (AI) samples need the local GGUF model;
 MIDI/
 ├── DOCUMENTATION.txt         # Full engineering reference
 ├── README.md                 # This file
+├── docker-compose.yml
+├── .env.docker.example
+├── .gitlab-ci.yml
 ├── start-backend.bat
 ├── start-frontend.bat
 ├── backend/                  # FastAPI + MidiEngine + local GGUF (text)
+│   ├── Dockerfile
 │   ├── README.md
 │   ├── app/
 │   │   └── features/chords_to_midi/exact.py   # Exact chord voicer
@@ -222,9 +228,29 @@ MIDI/
 │   ├── samples/
 │   └── run.py
 └── frontend/                 # Next.js studio UI
+    ├── Dockerfile
     ├── README.md
     └── src/
 ```
+
+## Docker (local or Oracle Free VM)
+
+Requires Docker Engine + Compose. Text mode still needs the GGUF on disk (mounted, not baked into the image).
+
+```powershell
+copy .env.docker.example .env.docker
+# Optional: put Qwen3-4B-Q4_K_M.gguf in backend/models/
+docker compose --env-file .env.docker up --build
+```
+
+| URL | Service |
+| --- | ------- |
+| http://localhost:3001 | Studio |
+| http://localhost:8000/docs | API |
+
+On an Oracle Free VM, set `NEXT_PUBLIC_API_URL=http://YOUR_PUBLIC_IP:8000` and matching `CORS_ORIGINS`, then rebuild. Open firewall ports **8000** and **3001**.
+
+GitLab CI (`.gitlab-ci.yml`): runs pytest + frontend build, then pushes images to the GitLab Container Registry on `main` / `feature/MIDI` / tags.
 
 ## Deploy notes
 
@@ -235,6 +261,7 @@ MIDI/
 | Backend bind | `HOST=0.0.0.0` and a public `PORT` |
 | Backend CORS | `CORS_ORIGINS=https://your-frontend-domain` |
 | Frontend | `NEXT_PUBLIC_API_URL=https://your-api-domain` then `npm run build` / `npm start` |
+| Docker | `.env.docker` from `.env.docker.example`; `docker compose up --build` |
 
 Restart the API after code pulls unless `UVICORN_RELOAD=1`.
 

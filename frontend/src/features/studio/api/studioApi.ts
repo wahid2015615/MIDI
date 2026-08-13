@@ -1,10 +1,18 @@
 import type {
   ExpressionOptions,
+  GenerateResult,
   TimingOptions,
   TimeSignatureOptions,
   TrackMixOptions,
   TrackOptions,
 } from "../types";
+
+/** Short calls: health / meta / parse / cancel. */
+export const SHORT_FETCH_MS = 15_000;
+/** Deterministic MIDI generate (chords / notes). */
+export const GENERATE_FETCH_MS = 120_000;
+/** Local GGUF text generate — long CPU jobs. */
+export const TEXT_GENERATE_FETCH_MS = 15 * 60_000;
 
 function isLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
@@ -39,6 +47,38 @@ export function resolveApiBase(): string {
 
 /** Prefer resolveApiBase() in browser code; this is a SSR-safe default. */
 export const API_BASE = resolveApiBase();
+
+function apiAuthHeaders(): Record<string, string> {
+  const token = (process.env.NEXT_PUBLIC_API_TOKEN || "").trim();
+  if (!token) return {};
+  return { "X-MIDI-Token": token };
+}
+
+/** Merge an optional caller signal with a timeout; abort either side aborts both. */
+export function mergeAbortSignals(
+  timeoutMs: number,
+  outer?: AbortSignal,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const onOuter = () => controller.abort(outer?.reason);
+  if (outer) {
+    if (outer.aborted) {
+      controller.abort(outer.reason);
+    } else {
+      outer.addEventListener("abort", onOuter, { once: true });
+    }
+  }
+  const timer = window.setTimeout(() => {
+    controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms`, "AbortError"));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      window.clearTimeout(timer);
+      if (outer) outer.removeEventListener("abort", onOuter);
+    },
+  };
+}
 
 /** Format FastAPI `detail` (string | array | object) into a readable message. */
 export function formatApiDetail(detail: unknown, fallback = "Request failed"): string {
@@ -91,6 +131,7 @@ async function readErrorDetail(res: Response, fallback: string): Promise<string>
 
 type RequestOptions = {
   signal?: AbortSignal;
+  timeoutMs?: number;
 };
 
 function parseContentDispositionFilename(
@@ -114,47 +155,141 @@ function parseContentDispositionFilename(
   return fallbackName;
 }
 
+function looksLikeMidi(bytes: Uint8Array): boolean {
+  // SMF header chunk: MThd
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x4d &&
+    bytes[1] === 0x54 &&
+    bytes[2] === 0x68 &&
+    bytes[3] === 0x64
+  );
+}
+
+function midiContentTypeOk(contentType: string | null): boolean {
+  if (!contentType) return true; // some stacks omit type; sniff bytes instead
+  const ct = contentType.toLowerCase();
+  return (
+    ct.includes("midi") ||
+    ct.includes("octet-stream") ||
+    ct.includes("x-midi")
+  );
+}
+
 async function downloadMidi(
   path: string,
   body: unknown,
   fallbackName: string,
   options?: RequestOptions,
-) {
-  const res = await fetch(`${resolveApiBase()}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: options?.signal,
-  });
+): Promise<GenerateResult> {
+  const timeoutMs = options?.timeoutMs ?? GENERATE_FETCH_MS;
+  const { signal, cleanup } = mergeAbortSignals(timeoutMs, options?.signal);
+  try {
+    const res = await fetch(`${resolveApiBase()}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...apiAuthHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
 
-  if (!res.ok) {
-    throw new Error(await readErrorDetail(res, "Generation failed"));
+    if (!res.ok) {
+      throw new Error(await readErrorDetail(res, "Generation failed"));
+    }
+
+    if (!midiContentTypeOk(res.headers.get("Content-Type"))) {
+      throw new Error(
+        `Unexpected response type (${res.headers.get("Content-Type") || "unknown"}) — expected MIDI`,
+      );
+    }
+
+    const buffer = await res.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    if (!looksLikeMidi(bytes)) {
+      throw new Error("Response is not a Standard MIDI File (missing MThd header)");
+    }
+
+    const blob = new Blob([buffer], { type: "audio/midi" });
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const filename = parseContentDispositionFilename(disposition, fallbackName);
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Delay revoke — some browsers (esp. Firefox) need the URL alive after click().
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+
+    return {
+      filename,
+      bpm: res.headers.get("X-MIDI-BPM"),
+      bars: res.headers.get("X-MIDI-Bars"),
+      tracks: res.headers.get("X-MIDI-Tracks"),
+      ppq: res.headers.get("X-MIDI-PPQ"),
+      key: res.headers.get("X-MIDI-Key"),
+      timeSig: res.headers.get("X-MIDI-TimeSig"),
+    };
+  } finally {
+    cleanup();
   }
-
-  const blob = await res.blob();
-  const disposition = res.headers.get("Content-Disposition") || "";
-  const filename = parseContentDispositionFilename(disposition, fallbackName);
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  // Delay revoke — some browsers (esp. Firefox) need the URL alive after click().
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-
-  return {
-    filename,
-    bpm: res.headers.get("X-MIDI-BPM"),
-    bars: res.headers.get("X-MIDI-Bars"),
-    tracks: res.headers.get("X-MIDI-Tracks"),
-    ppq: res.headers.get("X-MIDI-PPQ"),
-    key: res.headers.get("X-MIDI-Key"),
-    timeSig: res.headers.get("X-MIDI-TimeSig"),
-  };
 }
+
+export type HealthResponse = {
+  status: string;
+  version: string;
+  ai?: {
+    provider: string;
+    model: string;
+    model_path?: string;
+    configured: boolean;
+    online?: boolean;
+    loaded?: boolean;
+    temperature?: number;
+    n_ctx?: number;
+    n_threads?: number;
+    n_gpu_layers?: number;
+  };
+};
+
+export type ParseTextResponse = {
+  bars: number;
+  bpm: number;
+  key: string;
+  mood: string;
+  style: string;
+  instrument: string;
+  include_chords: boolean;
+  include_bass: boolean;
+  include_drums: boolean;
+  time_signature?: { numerator: number; denominator: number };
+  detected: {
+    bars: boolean;
+    bpm: boolean;
+    key: boolean;
+    mood: boolean;
+    style: boolean;
+    instrument: boolean;
+    include_chords: boolean;
+    include_bass: boolean;
+    include_drums: boolean;
+    time_signature?: boolean;
+  };
+};
+
+export type MetaStylesResponse = {
+  styles: string[];
+  moods: string[];
+  default_mood?: string;
+  default_style?: string;
+  quantize_grids?: string[];
+  swing_grids?: string[];
+  ppq_options?: number[];
+};
 
 export async function generateFromText(
   payload: {
@@ -171,7 +306,6 @@ export async function generateFromText(
     timing?: TimingOptions;
     expression?: ExpressionOptions;
     file_type?: 0 | 1;
-    duplicate_score_meta?: boolean;
     filename?: string;
     seed?: number;
     client_request_id?: string;
@@ -182,7 +316,7 @@ export async function generateFromText(
     "/generate/text",
     payload,
     payload.filename || "text_output.mid",
-    options,
+    { ...options, timeoutMs: options?.timeoutMs ?? TEXT_GENERATE_FETCH_MS },
   );
 }
 
@@ -202,7 +336,6 @@ export async function generateFromChords(
     timing?: TimingOptions;
     expression?: ExpressionOptions;
     file_type?: 0 | 1;
-    duplicate_score_meta?: boolean;
     filename?: string;
     seed?: number;
   },
@@ -227,7 +360,6 @@ export async function generateFromNotes(
     timing?: TimingOptions;
     expression?: ExpressionOptions;
     file_type?: 0 | 1;
-    duplicate_score_meta?: boolean;
     filename?: string;
     seed?: number;
   },
@@ -241,92 +373,82 @@ export async function generateFromNotes(
   );
 }
 
-export async function parseTextPrompt(prompt: string, options?: RequestOptions) {
-  const res = await fetch(`${resolveApiBase()}/parse/text`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-    signal: options?.signal,
-  });
-  if (!res.ok) {
-    throw new Error(await readErrorDetail(res, "Failed to parse prompt"));
+export async function parseTextPrompt(
+  prompt: string,
+  options?: RequestOptions,
+): Promise<ParseTextResponse> {
+  const timeoutMs = options?.timeoutMs ?? SHORT_FETCH_MS;
+  const { signal, cleanup } = mergeAbortSignals(timeoutMs, options?.signal);
+  try {
+    const res = await fetch(`${resolveApiBase()}/parse/text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...apiAuthHeaders() },
+      body: JSON.stringify({ prompt }),
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(await readErrorDetail(res, "Failed to parse prompt"));
+    }
+    return (await res.json()) as ParseTextResponse;
+  } finally {
+    cleanup();
   }
-  return res.json() as Promise<{
-    bars: number;
-    bpm: number;
-    key: string;
-    mood: string;
-    style: string;
-    instrument: string;
-    include_chords: boolean;
-    include_bass: boolean;
-    include_drums: boolean;
-    time_signature?: { numerator: number; denominator: number };
-    detected: {
-      bars: boolean;
-      bpm: boolean;
-      key: boolean;
-      mood: boolean;
-      style: boolean;
-      instrument: boolean;
-      include_chords: boolean;
-      include_bass: boolean;
-      include_drums: boolean;
-      time_signature?: boolean;
-    };
-  }>;
 }
 
-export async function fetchHealth(options?: { probe?: boolean; signal?: AbortSignal }) {
+export async function fetchHealth(options?: {
+  probe?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<HealthResponse> {
   const probe = options?.probe ? "?probe=1" : "";
-  const res = await fetch(`${resolveApiBase()}/health${probe}`, {
-    cache: "no-store",
-    signal: options?.signal,
-  });
-  if (!res.ok) throw new Error("API offline");
-  return res.json() as Promise<{
-    status: string;
-    version: string;
-    ai?: {
-      provider: string;
-      model: string;
-      model_path?: string;
-      configured: boolean;
-      online?: boolean;
-      loaded?: boolean;
-      temperature?: number;
-      n_ctx?: number;
-      n_threads?: number;
-      n_gpu_layers?: number;
-    };
-  }>;
+  const timeoutMs = options?.timeoutMs ?? SHORT_FETCH_MS;
+  const { signal, cleanup } = mergeAbortSignals(timeoutMs, options?.signal);
+  try {
+    const res = await fetch(`${resolveApiBase()}/health${probe}`, {
+      cache: "no-store",
+      signal,
+      headers: { ...apiAuthHeaders() },
+    });
+    if (!res.ok) throw new Error("API offline");
+    return (await res.json()) as HealthResponse;
+  } finally {
+    cleanup();
+  }
 }
 
 export async function fetchMeta(options?: RequestOptions) {
   const base = resolveApiBase();
-  const [instrumentsRes, stylesRes] = await Promise.all([
-    fetch(`${base}/meta/instruments`, { signal: options?.signal }),
-    fetch(`${base}/meta/styles`, { signal: options?.signal }),
-  ]);
-  if (!instrumentsRes.ok || !stylesRes.ok) {
-    throw new Error("Failed to load meta endpoints");
+  const timeoutMs = options?.timeoutMs ?? SHORT_FETCH_MS;
+  const { signal, cleanup } = mergeAbortSignals(timeoutMs, options?.signal);
+  try {
+    const [instrumentsRes, stylesRes] = await Promise.all([
+      fetch(`${base}/meta/instruments`, { signal }),
+      fetch(`${base}/meta/styles`, { signal }),
+    ]);
+    if (!instrumentsRes.ok || !stylesRes.ok) {
+      throw new Error("Failed to load meta endpoints");
+    }
+    const [instruments, styles] = await Promise.all([
+      instrumentsRes.json(),
+      stylesRes.json() as Promise<MetaStylesResponse>,
+    ]);
+    return { instruments, styles, apiBase: base };
+  } finally {
+    cleanup();
   }
-  const [instruments, styles] = await Promise.all([
-    instrumentsRes.json(),
-    stylesRes.json(),
-  ]);
-  return { instruments, styles, apiBase: base };
 }
 
 /** Best-effort: tell backend to abort at the next AI checkpoint, then abort fetch. */
 export async function cancelGenerationRequest(
   clientRequestId?: string | null,
 ): Promise<void> {
+  const { signal, cleanup } = mergeAbortSignals(SHORT_FETCH_MS);
   try {
     await fetch(`${resolveApiBase()}/generate/cancel`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...apiAuthHeaders() },
       cache: "no-store",
+      signal,
       body: JSON.stringify(
         clientRequestId
           ? { client_request_id: String(clientRequestId) }
@@ -335,5 +457,7 @@ export async function cancelGenerationRequest(
     });
   } catch {
     // Offline / race — caller still aborts the local fetch.
+  } finally {
+    cleanup();
   }
 }

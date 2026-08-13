@@ -11,6 +11,7 @@ from app.core.catalog import (
     normalize_style,
 )
 from app.core.engine import BPM_MAX, BPM_MIN, BARS_DEFAULT, BARS_MAX, BARS_MIN
+from app.shared.limits import CLIENT_REQUEST_ID_MAX_LENGTH, PROMPT_MAX_LENGTH
 from app.shared.schemas import (
     ExpressionOptions,
     FileType,
@@ -26,12 +27,13 @@ class TextGenerateRequest(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=PROMPT_MAX_LENGTH,
         examples=["Generate a 16-bar uplifting piano melody in C Major at 128 BPM."],
     )
     bpm: float | None = Field(default=None, ge=BPM_MIN, le=BPM_MAX)
     client_request_id: str | None = Field(
         default=None,
-        max_length=128,
+        max_length=CLIENT_REQUEST_ID_MAX_LENGTH,
         description="Optional id so /generate/cancel can abort this request only",
     )
     bars: int | None = Field(

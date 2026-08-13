@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.engine import BPM_MAX, BPM_MIN
+from app.shared.limits import NOTES_LINE_MAX_LENGTH, NOTES_MAX_LINES
 from app.shared.schemas import (
     ExpressionOptions,
     FileType,
@@ -17,6 +18,7 @@ class NotesGenerateRequest(BaseModel):
     notes: list[str] = Field(
         ...,
         min_length=1,
+        max_length=NOTES_MAX_LINES,
         examples=[
             [
                 "@track Melody acoustic_grand_piano",
@@ -64,6 +66,10 @@ class NotesGenerateRequest(BaseModel):
         for line in value:
             if not isinstance(line, str):
                 continue
+            if len(line) > NOTES_LINE_MAX_LENGTH:
+                raise ValueError(
+                    f"Each notes line must be at most {NOTES_LINE_MAX_LENGTH} characters"
+                )
             stripped = line.strip()
             if not stripped:
                 continue

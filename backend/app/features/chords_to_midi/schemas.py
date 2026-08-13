@@ -7,6 +7,7 @@ from app.features.chords_to_midi.inputs import (
     parse_progression_string,
     validate_progression_chords,
 )
+from app.shared.limits import PROGRESSION_MAX_LENGTH
 from app.shared.schemas import (
     ExpressionOptions,
     FileType,
@@ -18,7 +19,12 @@ from app.shared.schemas import (
 
 
 class ChordGenerateRequest(BaseModel):
-    progression: str = Field(..., min_length=1, examples=["C | G | Am | F"])
+    progression: str = Field(
+        ...,
+        min_length=1,
+        max_length=PROGRESSION_MAX_LENGTH,
+        examples=["C | G | Am | F"],
+    )
     bpm: float = Field(default=120, ge=BPM_MIN, le=BPM_MAX)
     bars_per_chord: float = Field(
         default=1.0,

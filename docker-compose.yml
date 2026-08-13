@@ -1,0 +1,71 @@
+# MIDIgen — local / Oracle Free VM stack
+#
+# Prerequisites:
+#   1. Docker Desktop (Windows) or Docker Engine + Compose plugin
+#   2. Optional Text mode: place Qwen3-4B-Q4_K_M.gguf in backend/models/
+#
+# Quick start:
+#   copy .env.docker.example .env.docker
+#   # edit NEXT_PUBLIC_API_URL if you are not on localhost
+#   docker compose --env-file .env.docker up --build
+#
+# Studio:  http://localhost:3001
+# API:     http://localhost:8000/docs
+
+name: midigen
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: midigen-backend:local
+    container_name: midigen-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      UVICORN_RELOAD: "0"
+      LOCAL_N_GPU_LAYERS: "0"
+      LOCAL_MODEL_PATH: /app/models/Qwen3-4B-Q4_K_M.gguf
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.3}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-3072}
+      LOCAL_N_CTX: ${LOCAL_N_CTX:-4096}
+      MODEL_IDLE_UNLOAD_SECONDS: ${MODEL_IDLE_UNLOAD_SECONDS:-120}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
+      MIDIGEN_API_TOKEN: ${MIDIGEN_API_TOKEN:-}
+      GENERATED_ARCHIVE_MAX: ${GENERATED_ARCHIVE_MAX:-200}
+    volumes:
+      # Mount GGUF here (never bake the 2.5 GB model into the image)
+      - ./backend/models:/app/models:ro
+      - midigen_generated:/app/generated
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Browser-facing API URL (NOT the Docker service hostname)
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    image: midigen-frontend:local
+    container_name: midigen-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3001}:3001"
+    environment:
+      PORT: "3001"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  midigen_generated:

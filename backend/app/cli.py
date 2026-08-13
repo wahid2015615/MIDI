@@ -62,9 +62,17 @@ def main(argv: list[str] | None = None) -> None:
         add_notes_from_lines(engine, lines, instrument=args.instrument)
         print(f"Saved: {engine.export(args.output, file_type=args.file_type)}")
     elif args.command == "serve":
+        import os
+
         import uvicorn
 
-        uvicorn.run("app.main:app", host=args.host, port=args.port, reload=True)
+        reload = os.getenv("UVICORN_RELOAD", "0") == "1"
+        uvicorn.run(
+            "app.main:app",
+            host=args.host,
+            port=args.port,
+            reload=reload,
+        )
 
 
 if __name__ == "__main__":

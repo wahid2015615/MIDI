@@ -440,7 +440,7 @@ class MidiEngine:
                 ) from exc
         return events
 
-    def _active_tracks(self) -> list[MidiTrack]:
+    def active_tracks(self) -> list[MidiTrack]:
         """Tracks that should export / contribute to duration.
 
         Multi-solo: every solo-enabled track is kept (solo overrides mute).
@@ -449,6 +449,9 @@ class MidiEngine:
         if any(t.solo for t in self.tracks):
             return [t for t in self.tracks if t.solo]
         return [t for t in self.tracks if not t.muted]
+
+    # Compat alias for older call sites / tests
+    _active_tracks = active_tracks
 
     def _piece_end_tick(self, tracks: Iterable[MidiTrack]) -> int:
         """Latest absolute tick across notes, CC, and pitch bends."""

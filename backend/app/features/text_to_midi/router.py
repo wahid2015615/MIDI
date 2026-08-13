@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.engine import MidiEngine
 from app.features.generation.ai_client import AIMusicError
 from app.features.generation.service import (
     generate_from_prompt,
@@ -10,6 +11,7 @@ from app.features.generation.service import (
 )
 from app.features.text_to_midi.schemas import TextGenerateRequest
 from app.shared.http_errors import raise_generate_http
+from app.shared.limits import CLIENT_REQUEST_ID_MAX_LENGTH, PROMPT_MAX_LENGTH
 from app.shared.midi_response import (
     apply_expression_options,
     apply_score_meta,
@@ -20,13 +22,32 @@ from app.shared.midi_response import (
     ensure_exportable,
     send_midi,
 )
+from app.shared.security import require_expensive_ai_allowed
 
 
 router = APIRouter(tags=["text-to-midi"])
 
 
+class CancelGenerateRequest(BaseModel):
+    client_request_id: str | None = Field(
+        default=None,
+        max_length=CLIENT_REQUEST_ID_MAX_LENGTH,
+        description="Optional id so only that in-flight generate is cancelled",
+    )
+
+    @field_validator("client_request_id", mode="before")
+    @classmethod
+    def _normalize_client_request_id(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+
 @router.post("/generate/cancel")
-def cancel_generate(body: dict | None = None) -> dict[str, bool]:
+def cancel_generate(
+    body: CancelGenerateRequest | None = Body(default=None),
+) -> dict[str, bool]:
     """Best-effort abort of in-flight local-model generation.
 
     Optional JSON body ``{"client_request_id": "..."}`` cancels only that
@@ -36,12 +57,7 @@ def cancel_generate(body: dict | None = None) -> dict[str, bool]:
     """
     from app.features.generation.ai_client import request_generation_cancel
 
-    client_request_id = None
-    if isinstance(body, dict):
-        raw = body.get("client_request_id")
-        if raw is not None:
-            cleaned = str(raw).strip()
-            client_request_id = cleaned or None
+    client_request_id = body.client_request_id if body is not None else None
     request_generation_cancel(client_request_id)
     return {"cancelled": True}
 
@@ -72,48 +88,56 @@ def _require_at_least_one_role(body: TextGenerateRequest) -> None:
         )
 
 
+def _build_text_engine(body: TextGenerateRequest) -> MidiEngine:
+    """Shared post-pipeline for /generate/text and /generate/text/preview."""
+    _require_at_least_one_role(body)
+    mix = body.mix
+    melody_inst = body.instrument
+    if mix and mix.instrument_melody:
+        melody_inst = mix.instrument_melody
+    include_melody, include_chords, include_bass, include_drums = _role_flags(body)
+    engine = generate_from_prompt(
+        body.prompt,
+        seed=body.seed,
+        bpm=body.bpm,
+        bars=body.bars,
+        key=body.key,
+        time_signature=_ts_tuple(body),
+        mood=body.mood,
+        style=body.style,
+        instrument=melody_inst,
+        include_chords=include_chords,
+        include_bass=include_bass,
+        include_drums=include_drums,
+        include_melody=include_melody,
+        instrument_chords=None if mix is None else mix.instrument_chords,
+        instrument_bass=None if mix is None else mix.instrument_bass,
+        instrument_drums=None if mix is None else mix.instrument_drums,
+        client_request_id=body.client_request_id,
+    )
+    apply_score_meta(engine, time_signature=body.time_signature, key=body.key)
+    apply_track_mix(engine, body.mix)
+    apply_track_selection(
+        engine,
+        include_melody=include_melody,
+        include_chords=include_chords,
+        include_bass=include_bass,
+        include_drums=include_drums,
+    )
+    # Expression before timing so auto CC/PB get quantize / swing / humanize
+    apply_expression_options(engine, body.expression)
+    apply_timing(engine, body.timing, seed=body.seed)
+    ensure_exportable(engine)
+    return engine
+
+
 @router.post("/generate/text")
-def generate_text(body: TextGenerateRequest):
+def generate_text(body: TextGenerateRequest, request: Request):
     try:
-        print("[MIDIgen] POST /generate/text — request received", flush=True)
-        _require_at_least_one_role(body)
-        mix = body.mix
-        melody_inst = body.instrument
-        if mix and mix.instrument_melody:
-            melody_inst = mix.instrument_melody
-        include_melody, include_chords, include_bass, include_drums = _role_flags(body)
-        engine = generate_from_prompt(
-            body.prompt,
-            seed=body.seed,
-            bpm=body.bpm,
-            bars=body.bars,
-            key=body.key,
-            time_signature=_ts_tuple(body),
-            mood=body.mood,
-            style=body.style,
-            instrument=melody_inst,
-            include_chords=include_chords,
-            include_bass=include_bass,
-            include_drums=include_drums,
-            include_melody=include_melody,
-            instrument_chords=None if mix is None else mix.instrument_chords,
-            instrument_bass=None if mix is None else mix.instrument_bass,
-            instrument_drums=None if mix is None else mix.instrument_drums,
-            client_request_id=body.client_request_id,
-        )
-        apply_score_meta(engine, time_signature=body.time_signature, key=body.key)
-        apply_track_mix(engine, body.mix)
-        apply_track_selection(
-            engine,
-            include_melody=include_melody,
-            include_chords=include_chords,
-            include_bass=include_bass,
-            include_drums=include_drums,
-        )
-        # Expression before timing so auto CC/PB get quantize / swing / humanize
-        apply_expression_options(engine, body.expression)
-        apply_timing(engine, body.timing, seed=body.seed)
-        ensure_exportable(engine)
+        require_expensive_ai_allowed(request)
+        logger_msg = "[MIDIgen] POST /generate/text — request received"
+        print(logger_msg, flush=True)
+        engine = _build_text_engine(body)
         return send_midi(
             engine,
             body.filename,
@@ -125,52 +149,17 @@ def generate_text(body: TextGenerateRequest):
 
 
 @router.post("/generate/text/preview")
-def generate_text_preview(body: TextGenerateRequest) -> dict:
+def generate_text_preview(body: TextGenerateRequest, request: Request) -> dict:
     try:
-        _require_at_least_one_role(body)
-        mix = body.mix
-        melody_inst = body.instrument
-        if mix and mix.instrument_melody:
-            melody_inst = mix.instrument_melody
-        include_melody, include_chords, include_bass, include_drums = _role_flags(body)
-        engine = generate_from_prompt(
-            body.prompt,
-            seed=body.seed,
-            bpm=body.bpm,
-            bars=body.bars,
-            key=body.key,
-            time_signature=_ts_tuple(body),
-            mood=body.mood,
-            style=body.style,
-            instrument=melody_inst,
-            include_chords=include_chords,
-            include_bass=include_bass,
-            include_drums=include_drums,
-            include_melody=include_melody,
-            instrument_chords=None if mix is None else mix.instrument_chords,
-            instrument_bass=None if mix is None else mix.instrument_bass,
-            instrument_drums=None if mix is None else mix.instrument_drums,
-            client_request_id=body.client_request_id,
-        )
-        apply_score_meta(engine, time_signature=body.time_signature, key=body.key)
-        apply_track_mix(engine, body.mix)
-        apply_track_selection(
-            engine,
-            include_melody=include_melody,
-            include_chords=include_chords,
-            include_bass=include_bass,
-            include_drums=include_drums,
-        )
-        apply_expression_options(engine, body.expression)
-        apply_timing(engine, body.timing, seed=body.seed)
-        ensure_exportable(engine)
+        require_expensive_ai_allowed(request)
+        engine = _build_text_engine(body)
         return engine_meta(engine)
     except (AIMusicError, ValueError, OverflowError, HTTPException) as exc:
         raise_generate_http(exc)
 
 
 class TextParseRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=8000)
+    prompt: str = Field(..., min_length=1, max_length=PROMPT_MAX_LENGTH)
 
     @field_validator("prompt", mode="before")
     @classmethod

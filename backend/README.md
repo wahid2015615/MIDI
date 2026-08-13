@@ -59,7 +59,9 @@ python run.py
 | `HOST`            | `127.0.0.1`   | Bind address; use `0.0.0.0` when deploying       |
 | `PORT`            | `8000`        | Preferred listen port                            |
 | `CORS_ORIGINS`    | _(empty)_     | Extra allowed frontend origins (comma-separated) |
-| `CORS_ORIGIN_REGEX` | _(LAN regex)_ | Empty string disables default private-LAN regex |
+| `CORS_ORIGIN_REGEX` | _(LAN regex)_ | Empty disables; unset + exposed HOST → no LAN regex |
+| `MIDIGEN_API_TOKEN` | _(unset)_   | Optional token for text generate + `?probe=1`    |
+| `GENERATED_ARCHIVE_MAX` | `200`   | Max archived `.mid` files under `generated/`     |
 | `UVICORN_RELOAD`  | `0`           | Set to `1` to enable auto-reload                 |
 
 If the preferred port is busy, `run.py` exits with a clear error so

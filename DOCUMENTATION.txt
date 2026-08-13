@@ -7,7 +7,7 @@
   Version          : 0.1.0
   Status           : Authoritative engineering reference
   Audience         : Backend / frontend engineers, QA, API integrators
-  Last updated     : 2026-08-07 (final bugfix: finite beats, cancel ids, notes, BPM)
+  Last updated     : 2026-08-12 (Docker Compose, GitLab CI, deploy checklist)
   Format           : Plain text
   Companion guides : README.md | backend/README.md | frontend/README.md
   Live schemas     : http://127.0.0.1:8000/docs  (when API is running)
@@ -167,9 +167,13 @@ RUNTIME
   MIDI/
   |-- DOCUMENTATION.txt              <-- this file (authoritative)
   |-- README.md                      product overview + quick start
+  |-- docker-compose.yml             local / VM container stack
+  |-- .env.docker.example            compose env template
+  |-- .gitlab-ci.yml                 test + image push (GitLab Free)
   |-- start-backend.bat
   |-- start-frontend.bat
   |-- backend/
+  |   |-- Dockerfile                 API image (CPU llama-cpp)
   |   |-- app/
   |   |   |-- main.py                FastAPI app, CORS, /health
   |   |   |-- cli.py                 midi-gen
@@ -190,9 +194,12 @@ RUNTIME
   |   |-- tests/
   |   |-- run.py
   |   |-- requirements.txt
+  |   |-- requirements-dev.txt       pytest + httpx (CI / local tests)
   |   |-- pyproject.toml
   |   +-- .env.example
   +-- frontend/
+      |-- Dockerfile                 Studio image (Next.js standalone)
+      |-- public/                    static assets (may be empty)
       |-- src/
       |   |-- app/                   App Router (/, layout, styles)
       |   |-- features/studio/
@@ -573,9 +580,9 @@ Sustain pairs remain ordered under timing even when off_value ≠ 0.
 
   Method  Path                      AI   Primary body
   ------  ------------------------  ---  ------------------------------------
-  POST    /generate/text            Yes  prompt + optional bpm/bars/key/mood/
-                                        style/instrument/tracks/mix/timing/
-                                        expression/file_type/
+  POST    /generate/text            Yes  prompt (max 8000) + optional bpm/bars/
+                                        key/mood/style/instrument/tracks/mix/
+                                        timing/expression/file_type/
                                         duplicate_score_meta/seed/filename/
                                         client_request_id
   POST    /generate/text/preview    Yes  same body → JSON engine meta
@@ -583,10 +590,12 @@ Sustain pairs remain ordered under timing even when off_value ≠ 0.
                                         cancel; omit → cancel all registered.
                                         Checkpoint abort → {"cancelled": true}
   POST    /parse/text              No   { "prompt": "..." } (max 8000 chars)
-  POST    /generate/chords          No   progression, bpm, bars_per_chord, key,
-                                        role flags, mix/timing/expression/...
+  POST    /generate/chords          No   progression (max 4000 chars), bpm,
+                                        bars_per_chord, key, role flags,
+                                        mix/timing/expression/...
                                         (len(chords)×bars_per_chord ≤ 512)
-  POST    /generate/notes           No  notes[], bpm, key, instrument,
+  POST    /generate/notes           No  notes[] (max 2000 lines, 500 chars/
+                                        line), bpm, key, instrument,
                                         mix/timing/expression/...
 
 Successful generate/* (except preview/cancel) → audio/midi download
@@ -636,9 +645,11 @@ Successful generate/* (except preview/cancel) → audio/midi download
 --------
 
 Always allow localhost:3000 / 3001 (and 127.0.0.1 variants).
-Default origin regex covers private LAN (10.*, 172.16–31.*, 192.168.*).
-Production: set CORS_ORIGINS (comma-separated). Optional CORS_ORIGIN_REGEX
-(empty string disables the default regex).
+When HOST is loopback, default origin regex also covers private LAN
+(10.*, 172.16–31.*, 192.168.*). When HOST is non-loopback (e.g. 0.0.0.0),
+that LAN regex is OFF unless CORS_ORIGIN_REGEX is set explicitly — use
+CORS_ORIGINS (comma-separated) and/or CORS_ORIGIN_REGEX for Studio on LAN.
+Empty CORS_ORIGIN_REGEX disables the regex.
 
 
 ================================================================================
@@ -649,20 +660,23 @@ Production: set CORS_ORIGINS (comma-separated). Optional CORS_ORIGIN_REGEX
   ------------------------------------  ---------------------------------------
   src/app/                              App Router, layout, globals.css
   src/features/studio/components/       StudioPage.tsx (main UI + mixer)
-  src/features/studio/api/studioApi.ts  Fetch + .mid blob download
+  src/features/studio/api/studioApi.ts  Fetch + timeouts + .mid sniff download
   src/features/studio/types.ts          Options types
-  src/features/studio/constants.ts      Catalogs; bars UI 1–128
+  src/features/studio/constants.ts      Catalog fallbacks; bars UI 1–128
   src/shared/ui/                        Form helpers
 
 User flow:
   1. Choose mode (text / chords / notes)
   2. Optional prompt parse (POST /parse/text) auto-fills ONLY detected fields
-  3. Health (?probe=1) + /meta/instruments|/styles drive status + dropdowns
+     (in-flight parse is aborted on prompt change; short request timeout)
+  3. Health (?probe=1 once) + /meta/instruments|/styles drive status +
+     moods/styles/quantize/swing/PPQ dropdowns (fallback to constants)
      (GGUF / AI ready gate applies to Text mode only; Chords+Notes generate
      without the local model)
   4. Mixer: role pills, Mute/Solo, instruments, channels, vol/pan
   5. Swing = MPC 50–75% (converted before POST)
   6. Generate → download .mid via /generate/text|chords|notes
+     (response must look like SMF: MThd; Content-Type checked)
   7. Cancel (Text) → POST /generate/cancel then AbortController abort
 
 Studio defaults (current UI):
@@ -750,8 +764,8 @@ CLI = composition → engine.export ONLY.
 It does NOT run mix / expression / timing post-pipeline.
 Use Studio or REST for those controls.
 
-Note: midi-gen serve always uses uvicorn reload=True. Prefer python run.py
-when you need UVICORN_RELOAD from backend/.env.
+Note: midi-gen serve respects UVICORN_RELOAD from the environment (default off).
+Prefer python run.py for the same PORT/HOST/.env loading behaviour.
 
 
 ================================================================================
@@ -776,7 +790,11 @@ when you need UVICORN_RELOAD from backend/.env.
   PORT                      No         8000 (fail if busy unless PORT_FALLBACK=1)
   PORT_FALLBACK             No         0 = exit when PORT busy; 1 = next free port
   CORS_ORIGINS              Deploy     Extra origins, comma-separated
-  CORS_ORIGIN_REGEX         Optional   Empty disables default LAN regex
+  CORS_ORIGIN_REGEX         Optional   Empty disables; unset + loopback HOST
+                                       → default LAN regex; unset + exposed HOST
+                                       → no LAN regex (opt-in)
+  MIDIGEN_API_TOKEN         Optional   Protects text generate + health?probe=1
+  GENERATED_ARCHIVE_MAX     No         Max .mid files kept in generated/ (200)
   UVICORN_RELOAD            Dev        unset/0 = off in run.py; .env.example
                                        sets 1 for local copies
 
@@ -849,6 +867,8 @@ or SMF validation.
 16. DEPLOYMENT CHECKLIST
 ================================================================================
 
+  Native (no Docker)
+  ------------------
   1. Place Qwen3-4B-Q4_K_M.gguf in backend/models/
   2. HOST=0.0.0.0 + public PORT (+ TLS reverse proxy as needed)
   3. CORS_ORIGINS=https://your-frontend-domain
@@ -856,10 +876,28 @@ or SMF validation.
   5. GET /health and GET /health?probe=1
   6. Smoke-test text, chords, notes generate
 
+  Docker Compose (local or Oracle Free VM)
+  ----------------------------------------
+  1. copy .env.docker.example → .env.docker; set NEXT_PUBLIC_API_URL + CORS_ORIGINS
+  2. Place GGUF under backend/models/ (mounted read-only into the API container)
+  3. docker compose --env-file .env.docker up --build
+  4. Open Studio :3001 and API /docs :8000; open firewall ports if on a VM
+  5. Smoke-test as above
+
+  GitLab CI
+  ---------
+  .gitlab-ci.yml runs backend pytest + frontend lint/build, then pushes
+  midigen/backend and midigen/frontend images to the GitLab Container Registry
+  on the default branch, feature/MIDI, or tags. Deploy to the VM is manual
+  (docker compose pull / up) so Free-tier CI minutes stay low.
+
 Notes:
-  * No built-in auth — private network / gateway if public
+  * Optional MIDIGEN_API_TOKEN (mirror NEXT_PUBLIC_API_TOKEN on Studio)
+  * Private network / gateway still recommended if public
   * Pin PORT in production (do not rely on local port fallback)
   * Restart API after deploys unless UVICORN_RELOAD=1
+  * Never bake the .gguf into the image; mount or download on the host
+  * Frontend NEXT_PUBLIC_API_URL is build-time — rebuild after changing it
 
 
 ================================================================================
@@ -869,8 +907,11 @@ Notes:
   Topic           Posture
   --------------  -------------------------------------------------------------
   Secrets         .env local; .env.example placeholders only
-  AuthN/Z         None on generate endpoints
-  CORS            Explicit + optional regex; tighten for production
+  AuthN/Z         Optional MIDIGEN_API_TOKEN for text generate + health?probe=1
+                  (Bearer or X-MIDI-Token). Remote probe blocked without token
+                  when HOST is non-loopback.
+  Input caps      prompt/parse 8000; progression 4000; notes 2000×500
+  CORS            Loopback HOST → LAN regex default; exposed HOST → opt-in
   Filenames       safe_filename before Content-Disposition
   LLM input       Untrusted; constrained by schemas / catalogs
   Dependencies    Range pins in requirements.txt / pyproject.toml
@@ -955,7 +996,8 @@ Documented intentionally (not silent bugs):
   * Studio bars capped at 128; API allows up to 512.
   * Studio does not send duplicate_score_meta (API default false).
   * Studio does not call /generate/text/preview or /meta/ai (REST still can).
-  * No authentication on generate endpoints.
+  * Optional MIDIGEN_API_TOKEN on text generate / health?probe=1 (not required
+    for local loopback without a token). Chords/Notes stay open.
   * Text mode is creative AI — it does not hard-lock every requested bar
     or phrase the way Notes/Chords do.
   * Humanize / swing / quantize run AFTER the exact Notes/Chords builder.
@@ -994,11 +1036,14 @@ Documented intentionally (not silent bugs):
   Document                    Contents
   --------------------------  -------------------------------------------------
   DOCUMENTATION.txt           This file (authoritative)
-  README.md                   Product overview + quick start
+  README.md                   Product overview + quick start + Docker
   backend/README.md           Backend setup, API notes, CLI
   frontend/README.md          Studio setup, mixer, MPC swing
   backend/.env.example        Backend env template
   frontend/.env.example       Frontend env template
+  .env.docker.example         docker compose env template
+  docker-compose.yml          Backend + frontend containers
+  .gitlab-ci.yml              Test + Container Registry push
   /docs (running API)         Live OpenAPI / try-it-out
 
 
@@ -1008,6 +1053,13 @@ Documented intentionally (not silent bugs):
 
   Date         Notes
   -----------  ----------------------------------------------------------------
+  2026-08-12   Docker: backend/frontend Dockerfiles, docker-compose.yml,
+               .env.docker.example, .gitlab-ci.yml (test + registry push);
+               Next.js output standalone + build:prod; requirements-dev.txt.
+  2026-08-11   Hardening: input caps; optional API token; CORS regex off when
+               HOST non-loopback; text generate/preview deduped; apply_timing
+               domain ValueError; active_tracks(); Studio timeouts + parse
+               abort + MIDI sniff + /meta/styles catalogs + a11y; HTTP tests.
   2026-08-07   Final bugfix batch: finite beat caps; Notes multi-word
                @track + instrument re-validate; partial TrackOptions;
                BPM ≤0→120 on HTTP; cancel scoped by client_request_id;

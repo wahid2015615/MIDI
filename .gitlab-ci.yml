@@ -1,0 +1,119 @@
+# MIDIgen — GitLab CI/CD (Free tier friendly)
+#
+# Stages: test → build (push images to GitLab Container Registry)
+# Deploy to Oracle Free VM is manual (see README Deploy notes) so CI minutes stay low.
+#
+# Required: enable Container Registry on the project (Settings → General → Visibility).
+# Optional CI/CD variables (Settings → CI/CD → Variables):
+#   NEXT_PUBLIC_API_URL  — public API URL baked into the frontend image
+#   CORS_ORIGINS         — not baked; set on the VM at runtime
+
+stages:
+  - test
+  - build
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+  FF_TIMESTAMPS: "true"
+  DOCKER_TLS_CERTDIR: "/certs"
+  BACKEND_IMAGE: $CI_REGISTRY_IMAGE/backend
+  FRONTEND_IMAGE: $CI_REGISTRY_IMAGE/frontend
+
+default:
+  interruptible: true
+
+# ---------------------------------------------------------------------------
+# Test
+# ---------------------------------------------------------------------------
+
+backend:test:
+  stage: test
+  image: python:3.12-slim-bookworm
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends build-essential cmake git
+    - cd backend
+    - python -m pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+    - pip install -e .
+  script:
+    - pytest -q --tb=short
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}-pip"
+    paths:
+      - backend/.cache/pip
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/backend/.cache/pip"
+
+frontend:test:
+  stage: test
+  image: node:22-bookworm-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  before_script:
+    - cd frontend
+    - npm ci
+  script:
+    - npm run build:prod
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}-npm"
+    paths:
+      - frontend/node_modules/
+  variables:
+    NEXT_TELEMETRY_DISABLED: "1"
+    NEXT_PUBLIC_API_URL: "http://localhost:8000"
+
+# ---------------------------------------------------------------------------
+# Build & push images (skip on MR to save Free-tier minutes)
+# ---------------------------------------------------------------------------
+
+backend:image:
+  stage: build
+  image: docker:27-cli
+  services:
+    - docker:27-dind
+  needs: ["backend:test"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "feature/MIDI"
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      docker build \
+        -t "$BACKEND_IMAGE:$CI_COMMIT_SHORT_SHA" \
+        -t "$BACKEND_IMAGE:latest" \
+        ./backend
+    - docker push "$BACKEND_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$BACKEND_IMAGE:latest"
+
+frontend:image:
+  stage: build
+  image: docker:27-cli
+  services:
+    - docker:27-dind
+  needs: ["frontend:test"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "feature/MIDI"
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
+      docker build \
+        --build-arg "NEXT_PUBLIC_API_URL=${API_URL}" \
+        -t "$FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA" \
+        -t "$FRONTEND_IMAGE:latest" \
+        ./frontend
+    - docker push "$FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$FRONTEND_IMAGE:latest"

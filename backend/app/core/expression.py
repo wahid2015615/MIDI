@@ -106,7 +106,7 @@ def apply_expression(
     pb_interval = max(0.25, float(pitch_bend_interval_bars))
     pb_scoop = max(0.05, float(pitch_bend_scoop_beats))
 
-    for track in engine._active_tracks():
+    for track in engine.active_tracks():
         if is_drum_instrument(track.instrument) or track.channel == 9:
             # Drums: still ensure pitch bend center is clean; skip sustain/mod
             if pitch_bend and not _has_pitch_bend(track):

@@ -4,6 +4,8 @@ import logging
 import os
 import time
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +14,12 @@ from app.features.chords_to_midi.router import router as chords_router
 from app.features.meta.router import router as meta_router
 from app.features.notes_to_midi.router import router as notes_router
 from app.features.text_to_midi.router import router as text_router
+from app.shared.security import (
+    api_token,
+    bind_host,
+    bind_is_loopback,
+    require_model_probe_allowed,
+)
 
 logger = logging.getLogger("midigen.api")
 
@@ -50,17 +58,42 @@ def _cors_origins() -> list[str]:
 
 
 def _cors_origin_regex() -> str | None:
-    """Optional regex. Empty CORS_ORIGIN_REGEX disables; unset uses LAN default."""
+    """LAN regex only on loopback bind unless CORS_ORIGIN_REGEX is set explicitly.
+
+    When HOST is non-loopback (e.g. 0.0.0.0), default private-LAN regex is off —
+    set CORS_ORIGINS and/or CORS_ORIGIN_REGEX deliberately for LAN/deploy.
+    Empty CORS_ORIGIN_REGEX disables the regex.
+    """
     if "CORS_ORIGIN_REGEX" in os.environ:
         value = os.environ["CORS_ORIGIN_REGEX"].strip()
         return value or None
-    return _DEFAULT_ORIGIN_REGEX
+    if bind_is_loopback():
+        return _DEFAULT_ORIGIN_REGEX
+    return None
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    if not bind_is_loopback() and not api_token():
+        logger.warning(
+            "HOST=%s is non-loopback and MIDIGEN_API_TOKEN is unset — "
+            "text generate and probes are open on the network. "
+            "Set MIDIGEN_API_TOKEN and tighten CORS_ORIGINS for deploy.",
+            bind_host(),
+        )
+    if not bind_is_loopback() and "CORS_ORIGIN_REGEX" not in os.environ:
+        logger.info(
+            "Default LAN CORS regex disabled (non-loopback HOST). "
+            "Set CORS_ORIGINS and/or CORS_ORIGIN_REGEX for Studio access."
+        )
+    yield
 
 
 app = FastAPI(
     title="MIDI Generation API",
     description="Generate Standard MIDI files using a local GGUF model.",
     version=__version__,
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -85,10 +118,6 @@ async def log_requests(request: Request, call_next):
         response.status_code,
         elapsed_ms,
     )
-    print(
-        f"{request.method} {request.url.path} -> {response.status_code} ({elapsed_ms:.1f} ms)",
-        flush=True,
-    )
     return response
 
 
@@ -99,10 +128,12 @@ app.include_router(meta_router)
 
 
 @app.get("/health")
-def health(probe: bool = False) -> dict:
+def health(request: Request, probe: bool = False) -> dict:
     """Liveness. Pass probe=1 to load/check the local GGUF model."""
     from app.features.generation.ai_client import model_status as ai_status
 
+    if probe:
+        require_model_probe_allowed(request)
     return {
         "status": "ok",
         "version": __version__,

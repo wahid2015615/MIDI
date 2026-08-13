@@ -9,7 +9,6 @@ import tempfile
 import time
 from pathlib import Path
 
-from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -47,7 +46,7 @@ EMPTY_EXPORT_MESSAGE = (
 
 def ensure_exportable(engine: MidiEngine) -> None:
     """Raise if mix/selection left nothing playable to export."""
-    active = engine._active_tracks()
+    active = engine.active_tracks()
     if not active or not any(t.notes for t in active):
         raise ValueError(EMPTY_EXPORT_MESSAGE)
 
@@ -220,12 +219,9 @@ def apply_timing(
     engine.ppq = timing.ppq
     swing_grid = timing.swing_grid or "1/8"
     if timing.swing > 0 and swing_grid not in GRID_BEATS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid swing_grid '{swing_grid}'. "
-                f"Use one of: {', '.join(SWING_GRIDS)}"
-            ),
+        raise ValueError(
+            f"Invalid swing_grid '{swing_grid}'. "
+            f"Use one of: {', '.join(SWING_GRIDS)}"
         )
 
     humanize_seed = timing.seed if timing.seed is not None else seed
@@ -233,12 +229,9 @@ def apply_timing(
     for index, track in enumerate(engine.tracks):
         if timing.quantize:
             if timing.quantize not in GRID_BEATS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Invalid quantize grid '{timing.quantize}'. "
-                        f"Use one of: {', '.join(GRID_BEATS)}"
-                    ),
+                raise ValueError(
+                    f"Invalid quantize grid '{timing.quantize}'. "
+                    f"Use one of: {', '.join(GRID_BEATS)}"
                 )
             quantize_track(
                 track,
@@ -432,7 +425,7 @@ def send_midi(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
-    active = engine._active_tracks()
+    active = engine.active_tracks()
     num, den = engine.time_signature
     headers = {
         "X-MIDI-BPM": str(engine.bpm),
