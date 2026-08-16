@@ -1,25 +1,123 @@
 # MIDIgen
 
-Generate **Standard MIDI Files** (`.mid`) from text prompts, chord progressions, or exact note lists.
+Generate **Standard MIDI Files** (`.mid`) from text, chords, or exact note lists. Open the result in Ableton Live, FL Studio, Logic Pro, Cubase, Reaper, Studio One, or any SMF-compatible DAW.
 
-| Mode | AI? | Output |
-| ---- | --- | ------ |
+| Mode | AI? | What you get |
+| ---- | --- | ------------ |
 | **Text** | Yes (local GGUF) | Creative arrangement from a natural-language prompt |
-| **Chords** | No | **Exact** voicings from chord symbols (Am7 → A C E G, …) |
-| **Notes** | No | **Exact** pitch, timing, duration, velocity |
+| **Chords** | No | Exact voicings from chord symbols (`Am7` → A C E G, …) |
+| **Notes** | No | Exact pitch, timing, duration, and velocity |
 
-Compatible with major DAWs (Ableton Live, FL Studio, Logic Pro, Cubase, Reaper, Studio One) via SMF Type 0 and Type 1 export.
+Studio UI on **:3001**, FastAPI on **:8000**. Exports SMF Type 0 (single track) or Type 1 (multi-track with Conductor).
+
+> Do **not** commit the model. `Qwen3-4B-Q4_K_M.gguf` (~2.5 GB) stays on disk under `backend/models/`. Git ignores `*.gguf`. Chords and Notes work without it.
+
+---
+
+## Contents
+
+1. [Quick start (Docker)](#quick-start-docker)
+2. [Quick start (Python + Node)](#quick-start-python--node)
+3. [Features](#features)
+4. [Architecture](#architecture)
+5. [Mixer / Solo](#mixer--solo)
+6. [Chord input](#chord-input)
+7. [Notes input](#notes-input)
+8. [Configuration](#configuration)
+9. [HTTP API](#http-api)
+10. [CLI](#cli)
+11. [GitLab CI/CD](#gitlab-cicd)
+12. [Deploy](#deploy)
+13. [Layout](#layout)
+14. [Docs](#docs)
+
+---
+
+## Quick start (Docker)
+
+Recommended. Needs Docker Desktop (Windows) or Docker Engine + Compose.
+
+```powershell
+cd "path\to\MIDI"
+copy .env.docker.example .env.docker
+# Optional Text mode: put Qwen3-4B-Q4_K_M.gguf in backend\models\
+docker compose --env-file .env.docker up --build
+```
+
+| URL | Service |
+| --- | ------- |
+| [http://localhost:3001](http://localhost:3001) | Studio |
+| [http://localhost:8000/docs](http://localhost:8000/docs) | API (Swagger) |
+| [http://localhost:8000/health](http://localhost:8000/health) | Health |
+
+First backend build can take a while (`llama-cpp-python`). Stop with `Ctrl+C`, or:
+
+```powershell
+docker compose --env-file .env.docker down
+```
+
+Start again without rebuilding:
+
+```powershell
+docker compose --env-file .env.docker up
+```
+
+Do **not** also run `python run.py` / `npm run dev` while Compose is up — ports 8000 and 3001 will clash.
+
+The GGUF is **mounted** from `backend/models/` (read-only). It is never baked into the image.
+
+---
+
+## Quick start (Python + Node)
+
+Use this for local development without Docker.
+
+**Need:** Python 3.10+, Node.js 18+. Text mode also needs `backend/models/Qwen3-4B-Q4_K_M.gguf`.
+
+### Backend
+
+```powershell
+cd "path\to\MIDI"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+cd backend
+copy .env.example .env
+pip install -r requirements.txt
+pip install -e .
+python run.py
+```
+
+API: [http://127.0.0.1:8000](http://127.0.0.1:8000) · docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+Windows shortcut: `start-backend.bat` from the repo root (expects an existing `.venv`).
+
+### Frontend
+
+```powershell
+cd frontend
+copy .env.example .env.local
+npm install
+npm run dev
+```
+
+Studio: [http://localhost:3001](http://localhost:3001). `NEXT_PUBLIC_API_URL` must match the backend (default `http://127.0.0.1:8000`).
+
+Windows shortcut: `start-frontend.bat` from the repo root.
+
+---
 
 ## Features
 
-- **Text → MIDI** — natural-language prompts (style, mood, key, BPM, bars); requires `Qwen3-4B-Q4_K_M.gguf`
+- **Text → MIDI** — style, mood, key, BPM, bars from a prompt; needs the local Qwen GGUF
 - **Chords → MIDI** — exact progression voicings (e.g. `C | G | Am | F`); optional melody arpeggio, bass, drums
-- **Notes → MIDI** — line-based input (`C4 q`, same-line `C4 E4 G4 q`, rests, multi-track directives)
-- **Multi-track mix** — melody, chords, bass, drums with instrument, channel, volume, pan, mute/solo
+- **Notes → MIDI** — line input (`C4 q`, same-line `C4 E4 G4 q`, rests, `@track` directives)
+- **Mixer** — melody, chords, bass, drums with instrument, channel, volume, pan, mute/solo
 - **Timing** — PPQ, quantize, MPC-style swing, humanize
 - **Expression** — sustain (CC64), modulation (CC1), pitch bend (applied before timing)
-- **Studio UI** — Next.js frontend with downloadable `.mid` output
-- **API & CLI** — FastAPI REST endpoints and `midi-gen` command-line tool
+- **Studio** — Next.js UI with downloadable `.mid`
+- **API & CLI** — FastAPI REST and `midi-gen`
+
+---
 
 ## Architecture
 
@@ -39,7 +137,9 @@ Text / Chords / Notes
  Standard .mid (Type 0 or 1)
 ```
 
-## Mixer / Solo (quick)
+---
+
+## Mixer / Solo
 
 | Situation | What exports |
 | --------- | ------------ |
@@ -50,7 +150,9 @@ Text / Chords / Notes
 
 Muted / disabled roles are **omitted** from the file (export-as-heard), not left as silent tracks.
 
-## Chord input (exact mode)
+---
+
+## Chord input
 
 Separators (any one style): `|`  `-`  `,`  `->` / `→`  spaces  newlines
 
@@ -60,9 +162,11 @@ Am7 | Dm7 | G7 | Cmaj7
 Cmaj9 | Am7/E | Bm7b5 | G7b9
 ```
 
-Qualities: see `backend/app/core/theory.py` `CHORD_QUALITY` (maj, m, 7, maj7, m7, sus2/4, dim/dim7, 5, 6, add9/madd9/add2, 9/11/13 family, m7b5, 7alt / 7b9…, maj7#11, slash `C/G`, plus aliases).
+Qualities: `backend/app/core/theory.py` `CHORD_QUALITY` (maj, m, 7, maj7, m7, sus2/4, dim/dim7, 5, 6, add9/madd9/add2, 9/11/13 family, m7b5, 7alt / 7b9…, maj7#11, slash `C/G`, plus aliases).
 
-## Notes input (exact mode)
+---
+
+## Notes input
 
 Deterministic line parser — **no AI**. Multi-track via `@track` / `#track` / `[Name]`.
 
@@ -96,68 +200,31 @@ Same-line pitches (`C4 E4 G4 q`) share one beat. In the `.mid`, list order of th
 
 All modes still send shared **mix / timing / expression** on generate.
 
-## Prerequisites
-
-- **Python** 3.10+
-- **Node.js** 18+ (for the studio UI)
-- Local model file: `backend/models/Qwen3-4B-Q4_K_M.gguf` (~2.5 GB) — **text mode only** (chords/notes work without it)
-
-## Quick start
-
-### 1. Backend
-
-```powershell
-cd "path\to\MIDI"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-cd backend
-copy .env.example .env
-# Place Qwen3-4B-Q4_K_M.gguf into backend/models/  (needed for Text mode)
-pip install -r requirements.txt
-pip install -e .
-python run.py
-```
-
-API defaults to `http://127.0.0.1:8000`. Interactive docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-
-On Windows you can also run `start-backend.bat` from the repo root (expects an existing `.venv`).
-
-### 2. Frontend
-
-```powershell
-cd frontend
-copy .env.example .env.local
-npm install
-npm run dev
-```
-
-Open [http://localhost:3001](http://localhost:3001). Ensure `NEXT_PUBLIC_API_URL` matches the backend URL (default `http://127.0.0.1:8000`).
-
-On Windows: `start-frontend.bat` from the repo root.
+---
 
 ## Configuration
 
 ### Backend (`backend/.env`)
 
-| Variable              | Description                                | Default                      |
-| --------------------- | ------------------------------------------ | ---------------------------- |
-| `LOCAL_MODEL_PATH`    | Optional path to `.gguf`                   | `models/Qwen3-4B-Q4_K_M.gguf` |
-| `AI_TEMPERATURE`      | Sampling temperature (≥ 0; seed does not override) | `0.3`                |
-| `AI_MAX_TOKENS`       | Max completion tokens                      | `3072`                       |
-| `LOCAL_N_CTX`         | Context window                             | `4096`                       |
-| `LOCAL_N_THREADS`     | CPU threads (optional)                     | CPU count − 1                |
-| `LOCAL_N_GPU_LAYERS`  | Offload layers to GPU (`0` = CPU)          | `0`                          |
-| `MODEL_IDLE_UNLOAD_SECONDS` | Idle seconds before unloading GGUF from RAM | `120` (min 5)          |
-| `HOST`                | Bind address (`0.0.0.0` for deploy)        | `127.0.0.1`                  |
-| `PORT`                | Uvicorn port                               | `8000`                       |
-| `PORT_FALLBACK`       | Auto next free port if busy (`1` = yes)    | `0` (fail hard)              |
-| `CORS_ORIGINS`        | Extra allowed frontend origins             | _(localhost defaults)_       |
-| `CORS_ORIGIN_REGEX`   | Override/disable default LAN regex         | _(private LAN allowed)_      |
-| `MIDIGEN_API_TOKEN`   | Optional token for text generate + probe   | _(unset)_                    |
-| `GENERATED_ARCHIVE_MAX` | Max archived `.mid` files under generated/ | `200`                      |
-| `UVICORN_RELOAD`      | Auto-reload on code changes                | `0`                          |
+| Variable | Description | Default |
+| -------- | ----------- | ------- |
+| `LOCAL_MODEL_PATH` | Optional path to `.gguf` | `models/Qwen3-4B-Q4_K_M.gguf` |
+| `AI_TEMPERATURE` | Sampling temperature (≥ 0; seed does not override) | `0.3` |
+| `AI_MAX_TOKENS` | Max completion tokens | `3072` |
+| `LOCAL_N_CTX` | Context window | `4096` |
+| `LOCAL_N_THREADS` | CPU threads (optional) | CPU count − 1 |
+| `LOCAL_N_GPU_LAYERS` | Offload layers to GPU (`0` = CPU) | `0` |
+| `MODEL_IDLE_UNLOAD_SECONDS` | Idle seconds before unloading GGUF from RAM | `120` (min 5) |
+| `HOST` | Bind address (`0.0.0.0` for deploy) | `127.0.0.1` |
+| `PORT` | Uvicorn port | `8000` |
+| `PORT_FALLBACK` | Auto next free port if busy (`1` = yes) | `0` (fail hard) |
+| `CORS_ORIGINS` | Extra allowed frontend origins | _(localhost defaults)_ |
+| `CORS_ORIGIN_REGEX` | Override/disable default LAN regex | _(private LAN allowed)_ |
+| `MIDIGEN_API_TOKEN` | Optional token for text generate + probe | _(unset)_ |
+| `GENERATED_ARCHIVE_MAX` | Max archived `.mid` files under `generated/` | `200` |
+| `UVICORN_RELOAD` | Auto-reload on code changes | `0` |
 
-See `backend/.env.example` for a full template.
+Template: `backend/.env.example`.
 
 ### Frontend (`frontend/.env.local`)
 
@@ -165,24 +232,34 @@ See `backend/.env.example` for a full template.
 NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 ```
 
-## API overview
+`NEXT_PUBLIC_API_URL` is **build-time**. After changing it, rebuild the frontend (or the Docker frontend image).
 
-| Method | Path                       | AI? | Description                              |
-| ------ | -------------------------- | --- | ---------------------------------------- |
-| `GET`  | `/health`                  | —   | Health, version, AI status (`?probe=1` loads/checks GGUF) |
-| `POST` | `/generate/text`           | Yes | Text prompt → `.mid` download            |
-| `POST` | `/generate/text/preview`   | Yes | Same generation, JSON metadata only      |
-| `POST` | `/generate/cancel`         | —   | Abort in-flight local GGUF compose       |
-| `POST` | `/parse/text`              | No  | Heuristic parse of prompt fields         |
-| `POST` | `/generate/chords`         | No  | Exact chord progression → `.mid`         |
-| `POST` | `/generate/notes`          | No  | Note lines → `.mid`                      |
-| `GET`  | `/meta/instruments`        | —   | GM instruments and aliases               |
-| `GET`  | `/meta/styles`             | —   | Styles, moods, PPQ, quantize, swing      |
-| `GET`  | `/meta/ai`                 | —   | Local model configuration                |
+### Docker (`.env.docker`)
+
+Copy from `.env.docker.example`. Important keys: `NEXT_PUBLIC_API_URL`, `CORS_ORIGINS`, host ports. Never commit `.env.docker`.
+
+---
+
+## HTTP API
+
+| Method | Path | AI? | Description |
+| ------ | ---- | --- | ----------- |
+| `GET` | `/health` | — | Health, version, AI status (`?probe=1` loads/checks GGUF) |
+| `POST` | `/generate/text` | Yes | Text prompt → `.mid` download |
+| `POST` | `/generate/text/preview` | Yes | Same generation, JSON metadata only |
+| `POST` | `/generate/cancel` | — | Abort in-flight local GGUF compose |
+| `POST` | `/parse/text` | No | Heuristic parse of prompt fields |
+| `POST` | `/generate/chords` | No | Exact chord progression → `.mid` |
+| `POST` | `/generate/notes` | No | Note lines → `.mid` |
+| `GET` | `/meta/instruments` | — | GM instruments and aliases |
+| `GET` | `/meta/styles` | — | Styles, moods, PPQ, quantize, swing |
+| `GET` | `/meta/ai` | — | Local model configuration |
 
 Shared generate options: mix, timing, expression, `file_type` (`0`/`1`), `duplicate_score_meta` (Type 1: default `false` = Conductor-only tempo map).
 
-Full schemas: `/docs`. Full engineering reference: [DOCUMENTATION.txt](DOCUMENTATION.txt).
+Live schemas: `/docs`. Engineering reference: [DOCUMENTATION.txt](DOCUMENTATION.txt).
+
+---
 
 ## CLI
 
@@ -197,20 +274,59 @@ midi-gen serve --port 8000
 
 CLI writes composition → export only (no Studio mix / expression / timing pipeline). Use REST or the Studio for full mixer/timing control.
 
-## Sample MIDI files
+Sample batch:
 
 ```powershell
 cd backend
 python examples/generate_samples.py
 ```
 
-Outputs land in `backend/samples/`. Text (AI) samples need the local GGUF model; chords/notes samples do not.
+Outputs land in `backend/samples/`. Text samples need the GGUF; chords/notes do not.
 
-## Project layout
+---
+
+## GitLab CI/CD
+
+File: [`.gitlab-ci.yml`](.gitlab-ci.yml)
+
+| Stage | Jobs | When |
+| ----- | ---- | ---- |
+| **test** | `backend:test` (pytest), `frontend:test` (`npm run build:prod`) | Every branch / MR |
+| **build** | `backend:image`, `frontend:image` → GitLab Container Registry | Default branch, `feature/MIDI`, or tags |
+
+GitLab.com shared runners need an **account verification** (phone or card). If that is blocked, register a **self-hosted runner** (your PC or Oracle VM) so jobs run locally and do not use the 400 free compute minutes.
+
+Enable **Container Registry** on the project (Settings → General → Visibility). Optional CI variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).
+
+Images (after a successful build job):
+
+- `registry.gitlab.com/<namespace>/midi/backend:latest`
+- `registry.gitlab.com/<namespace>/midi/frontend:latest`
+
+Deploy to a VM is **manual** (`docker compose` / `docker pull`) so CI minutes stay low.
+
+---
+
+## Deploy
+
+| Piece | What to set |
+| ----- | ----------- |
+| Model | `backend/models/Qwen3-4B-Q4_K_M.gguf` on the host (text mode). Never commit it |
+| Backend bind | `HOST=0.0.0.0` and a public `PORT` |
+| Backend CORS | `CORS_ORIGINS=` the Studio origin (e.g. `http://YOUR_IP:3001`) |
+| Frontend | `NEXT_PUBLIC_API_URL=` the public API URL, then rebuild |
+| Docker | `.env.docker` from `.env.docker.example`; `docker compose --env-file .env.docker up --build` |
+| Oracle Free VM | Open firewall ports **8000** and **3001**; rebuild frontend after changing the public API URL |
+
+Restart the API after code pulls unless `UVICORN_RELOAD=1`. Full checklist: [DOCUMENTATION.txt](DOCUMENTATION.txt) §16.
+
+---
+
+## Layout
 
 ```
 MIDI/
-├── DOCUMENTATION.txt         # Full engineering reference
+├── DOCUMENTATION.txt         # Engineering reference
 ├── README.md                 # This file
 ├── docker-compose.yml
 ├── .env.docker.example
@@ -221,53 +337,25 @@ MIDI/
 │   ├── Dockerfile
 │   ├── README.md
 │   ├── app/
-│   │   └── features/chords_to_midi/exact.py   # Exact chord voicer
-│   ├── models/               # Place Qwen3-4B-Q4_K_M.gguf here (text mode)
-│   ├── generated/            # Archived .mid + last model raw JSON
+│   ├── models/               # Place Qwen3-4B-Q4_K_M.gguf here (not in git)
+│   ├── generated/            # Archived .mid (local)
 │   ├── examples/
 │   ├── samples/
+│   ├── tests/
 │   └── run.py
-└── frontend/                 # Next.js studio UI
+└── frontend/                 # Next.js Studio
     ├── Dockerfile
     ├── README.md
     └── src/
 ```
 
-## Docker (local or Oracle Free VM)
+---
 
-Requires Docker Engine + Compose. Text mode still needs the GGUF on disk (mounted, not baked into the image).
+## Docs
 
-```powershell
-copy .env.docker.example .env.docker
-# Optional: put Qwen3-4B-Q4_K_M.gguf in backend/models/
-docker compose --env-file .env.docker up --build
-```
-
-| URL | Service |
-| --- | ------- |
-| http://localhost:3001 | Studio |
-| http://localhost:8000/docs | API |
-
-On an Oracle Free VM, set `NEXT_PUBLIC_API_URL=http://YOUR_PUBLIC_IP:8000` and matching `CORS_ORIGINS`, then rebuild. Open firewall ports **8000** and **3001**.
-
-GitLab CI (`.gitlab-ci.yml`): runs pytest + frontend build, then pushes images to the GitLab Container Registry on `main` / `feature/MIDI` / tags.
-
-## Deploy notes
-
-| Piece | What to set |
-| ----- | ----------- |
-| Backend `.env` | Model path if not default; never commit secrets |
-| Backend model  | `backend/models/Qwen3-4B-Q4_K_M.gguf` (text mode) |
-| Backend bind | `HOST=0.0.0.0` and a public `PORT` |
-| Backend CORS | `CORS_ORIGINS=https://your-frontend-domain` |
-| Frontend | `NEXT_PUBLIC_API_URL=https://your-api-domain` then `npm run build` / `npm start` |
-| Docker | `.env.docker` from `.env.docker.example`; `docker compose up --build` |
-
-Restart the API after code pulls unless `UVICORN_RELOAD=1`.
-
-## Documentation
-
-- [**DOCUMENTATION.txt**](DOCUMENTATION.txt) — architecture, pipelines, mixer, API, deploy
-- [Backend README](backend/README.md) — API setup, env vars, CLI details
-- [Frontend README](frontend/README.md) — studio UI setup and mixer/swing notes
-- OpenAPI — `http://127.0.0.1:8000/docs` when the server is running
+| File | Contents |
+| ---- | -------- |
+| [DOCUMENTATION.txt](DOCUMENTATION.txt) | Architecture, pipelines, mixer, API, deploy |
+| [backend/README.md](backend/README.md) | API setup, env vars, CLI |
+| [frontend/README.md](frontend/README.md) | Studio setup, mixer, MPC swing |
+| OpenAPI | `http://127.0.0.1:8000/docs` when the API is running |
