@@ -3,10 +3,21 @@
 # Stages: test → build (push images to GitLab Container Registry)
 # Deploy to Oracle Free VM is manual (see README Deploy notes) so CI minutes stay low.
 #
-# Required: enable Container Registry on the project (Settings → General → Visibility).
+# GitLab.com blocker: shared runners will not start jobs until the account is
+# verified (Pipelines page → "Verify my account"). Empty-stage failed pipelines
+# are identity verification, not a YAML error.
+#
+# Required: enable Container Registry (Settings → General → Visibility).
 # Optional CI/CD variables (Settings → CI/CD → Variables):
 #   NEXT_PUBLIC_API_URL  — public API URL baked into the frontend image
 #   CORS_ORIGINS         — not baked; set on the VM at runtime
+
+workflow:
+  name: "MIDI $CI_COMMIT_REF_NAME"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
 
 stages:
   - test
@@ -14,9 +25,7 @@ stages:
 
 variables:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_NO_CACHE_DIR: "1"
   FF_TIMESTAMPS: "true"
-  DOCKER_TLS_CERTDIR: "/certs"
   BACKEND_IMAGE: $CI_REGISTRY_IMAGE/backend
   FRONTEND_IMAGE: $CI_REGISTRY_IMAGE/frontend
 
@@ -33,21 +42,24 @@ backend:test:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  cache:
+    key:
+      files:
+        - backend/requirements-dev.txt
+        - backend/requirements.txt
+        - backend/pyproject.toml
+    paths:
+      - .cache/pip
   before_script:
-    - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends build-essential cmake git
     - cd backend
     - python -m pip install --upgrade pip
-    - pip install -r requirements-dev.txt
+    # Prebuilt CPU wheels avoid compiling llama-cpp-python on shared runners.
+    - pip install -r requirements-dev.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     - pip install -e .
   script:
     - pytest -q --tb=short
-  cache:
-    key: "${CI_COMMIT_REF_SLUG}-pip"
-    paths:
-      - backend/.cache/pip
-  variables:
-    PIP_CACHE_DIR: "$CI_PROJECT_DIR/backend/.cache/pip"
 
 frontend:test:
   stage: test
@@ -55,36 +67,48 @@ frontend:test:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH
-  before_script:
-    - cd frontend
-    - npm ci
-  script:
-    - npm run build:prod
-  cache:
-    key: "${CI_COMMIT_REF_SLUG}-npm"
-    paths:
-      - frontend/node_modules/
   variables:
     NEXT_TELEMETRY_DISABLED: "1"
     NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    npm_config_cache: "$CI_PROJECT_DIR/frontend/.npm"
+  cache:
+    key:
+      files:
+        - frontend/package-lock.json
+    paths:
+      - frontend/.npm/
+  before_script:
+    - cd frontend
+    - npm ci --cache "$npm_config_cache"
+  script:
+    - npm run build:prod
 
 # ---------------------------------------------------------------------------
 # Build & push images (skip on MR to save Free-tier minutes)
 # ---------------------------------------------------------------------------
 
-backend:image:
-  stage: build
-  image: docker:27-cli
+.dind:
+  image: docker:24.0.5-cli
   services:
-    - docker:27-dind
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    FF_NETWORK_PER_BUILD: "true"
+  before_script:
+    - until docker info; do echo "waiting for docker daemon..."; sleep 2; done
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+backend:image:
+  extends: .dind
+  stage: build
   needs: ["backend:test"]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH == "feature/MIDI"
     - if: $CI_COMMIT_TAG
-  before_script:
-    - docker info
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - |
       docker build \
@@ -95,18 +119,13 @@ backend:image:
     - docker push "$BACKEND_IMAGE:latest"
 
 frontend:image:
+  extends: .dind
   stage: build
-  image: docker:27-cli
-  services:
-    - docker:27-dind
   needs: ["frontend:test"]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH == "feature/MIDI"
     - if: $CI_COMMIT_TAG
-  before_script:
-    - docker info
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - |
       API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
