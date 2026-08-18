@@ -1,6 +1,7 @@
-# MIDIgen — GitHub Actions
+# MIDIgen — GitHub Actions CI/CD (single workflow)
 #
-# test → build images (GHCR) → optional AWS EC2 deploy
+# CI:  test → build images (GHCR)
+# CD:  optional AWS EC2 deploy (skipped until AWS_DEPLOY=true)
 #
 # AWS CD stays skipped (green) until you set:
 #   Variables: AWS_DEPLOY=true, AWS_PUBLIC_HOST=<ec2-ip-or-dns>
@@ -9,7 +10,7 @@
 # One-time on the VM: sudo bash deploy/aws/setup-ec2.sh
 # Optional: copy Qwen3-4B-Q4_K_M.gguf to /opt/midigen/models/ for text mode.
 
-name: CI
+name: CI/CD
 
 on:
   push:

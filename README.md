@@ -26,7 +26,7 @@ Studio UI on **:3001**, FastAPI on **:8000**. Exports SMF Type 0 (single track) 
 8. [Configuration](#configuration)
 9. [HTTP API](#http-api)
 10. [CLI](#cli)
-11. [GitHub Actions](#github-actions)
+11. [GitHub Actions CI/CD](#github-actions-cicd)
 12. [Deploy](#deploy)
 13. [AWS CD](#aws-cd)
 14. [Docs](#docs)
@@ -285,9 +285,9 @@ Outputs land in `backend/samples/`. Text samples need the GGUF; chords/notes do 
 
 ---
 
-## GitHub Actions
+## GitHub Actions CI/CD
 
-File: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+File: [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml)
 
 Repo: [github.com/wahid2015615/MIDI](https://github.com/wahid2015615/MIDI)
 
@@ -347,7 +347,7 @@ MIDI/
 ├── README.md                 # This file
 ├── docker-compose.yml
 ├── .env.docker.example
-├── .github/workflows/ci.yml  # GitHub Actions (test + GHCR + optional AWS CD)
+├── .github/workflows/ci-cd.yml  # GitHub Actions CI + CD (test, GHCR, AWS)
 ├── deploy/aws/               # EC2 compose + setup/deploy scripts
 ├── .gitlab-ci.yml            # GitLab CI (legacy)
 ├── start-backend.bat
