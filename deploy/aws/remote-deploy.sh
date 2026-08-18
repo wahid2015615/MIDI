@@ -17,18 +17,20 @@ docker logout ghcr.io >/dev/null 2>&1 || true
 
 ok=0
 for _ in $(seq 1 40); do
-  if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+  if curl -fsS http://127.0.0.1/health >/dev/null 2>&1; then
     ok=1
     break
   fi
   sleep 3
 done
 if [[ "$ok" -ne 1 ]]; then
-  echo "Backend /health failed after wait"
+  echo "Public /health failed after wait"
   docker compose --env-file .env logs --tail 80
   exit 1
 fi
 
-curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1/health
 echo
 echo "Deploy OK  tag=${MIDI_IMAGE_TAG:-latest}"
+echo "Studio    http://$(hostname -I | awk '{print $1}')/"
+echo "API docs  http://$(hostname -I | awk '{print $1}')/docs"

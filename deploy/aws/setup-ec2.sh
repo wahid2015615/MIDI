@@ -40,6 +40,6 @@ echo
 echo "EC2 Docker is ready."
 echo "  App dir : /opt/midigen"
 echo "  Model   : copy Qwen3-4B-Q4_K_M.gguf to /opt/midigen/models/ (optional, text mode)"
-echo "  Open SG : TCP 22 (your IP), 8000, 3001 (0.0.0.0/0 or your IP)"
+echo "  Open SG : TCP 22 (your IP), 80 (public) — do not expose 3001/8000"
 echo "  Size    : t3.large (8 GB) minimum; 30 GB disk if you use the GGUF"
-echo "Log out and back in if 'docker' permission is denied, then enable GitHub var AWS_DEPLOY=true"
+echo "  URLs    : http://<public-ip>/  and  http://<public-ip>/docs"

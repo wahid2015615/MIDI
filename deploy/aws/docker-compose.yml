@@ -1,7 +1,10 @@
-# MIDIgen on AWS EC2 — pull GHCR images (no local build)
+# MIDIgen on AWS EC2 — GHCR images + Caddy on port 80 (senior public URL)
 #
-# First-time host setup: sudo bash deploy/aws/setup-ec2.sh
-# CD copies this file to /opt/midigen and runs remote-deploy.sh
+# Public:
+#   http://<host>/         Studio
+#   http://<host>/docs     API
+#   http://<host>/health   liveness
+# Backend/frontend ports stay inside the Docker network (not published).
 
 name: midigen
 
@@ -11,8 +14,8 @@ services:
     pull_policy: always
     container_name: midigen-backend
     restart: unless-stopped
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+    expose:
+      - "8000"
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -23,7 +26,7 @@ services:
       AI_MAX_TOKENS: ${AI_MAX_TOKENS:-3072}
       LOCAL_N_CTX: ${LOCAL_N_CTX:-4096}
       MODEL_IDLE_UNLOAD_SECONDS: ${MODEL_IDLE_UNLOAD_SECONDS:-120}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      CORS_ORIGINS: ${CORS_ORIGINS}
       MIDIGEN_API_TOKEN: ${MIDIGEN_API_TOKEN:-}
       GENERATED_ARCHIVE_MAX: ${GENERATED_ARCHIVE_MAX:-200}
     volumes:
@@ -41,14 +44,28 @@ services:
     pull_policy: always
     container_name: midigen-frontend
     restart: unless-stopped
-    ports:
-      - "${FRONTEND_PORT:-3001}:3001"
+    expose:
+      - "3001"
     environment:
       PORT: "3001"
       HOSTNAME: "0.0.0.0"
     depends_on:
       backend:
         condition: service_healthy
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: midigen-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
 
 volumes:
   midigen_generated:

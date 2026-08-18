@@ -309,7 +309,7 @@ Images (after a successful image job):
 
 `deploy-aws` is **skipped** (pipeline stays green) until AWS is configured.
 
-1. AWS console → EC2 → Ubuntu 24.04 VM, **x86_64** (`t3.large` / 8 GB RAM minimum; 16 GB better for the 2.8 GB GGUF). 30 GB disk. Security group: **22** (your IP), **8000** and **3001** (public).
+1. AWS console → EC2 → Ubuntu 24.04 VM, **x86_64** (`t3.large` / 8 GB RAM minimum; 16 GB better for the 2.8 GB GGUF). 30 GB disk. Security group: **22** (your IP), **80** (public). Do not open 3001/8000.
 2. SSH in and run `sudo bash deploy/aws/setup-ec2.sh` (copy the file from this repo).
 3. Optional text mode: copy `Qwen3-4B-Q4_K_M.gguf` to `/opt/midigen/models/` on the VM (not via git).
 4. GitHub → Settings → Secrets and variables → Actions:
@@ -317,7 +317,10 @@ Images (after a successful image job):
    - Variable `AWS_DEPLOY` = `true`
    - Variable `AWS_EC2_USER` = `ubuntu` (skip if Ubuntu AMI)
    - Secret `EC2_SSH_KEY` = full private key (`BEGIN` … `END`)
-5. Push to `feature/midi` (or **Run workflow**). After deploy: `http://<AWS_PUBLIC_HOST>:3001` and `http://<AWS_PUBLIC_HOST>:8000/docs`.
+5. Push to `feature/midi` (or **Run workflow**). Public URLs (no app ports):
+
+   - Studio: `http://<AWS_PUBLIC_HOST>/`
+   - API docs: `http://<AWS_PUBLIC_HOST>/docs`
 
 GHCR packages for this repo must be pullable with `GITHUB_TOKEN` (default for the same repository). If pull fails, set the package visibility to **Public** (Package settings).
 
@@ -332,7 +335,7 @@ GHCR packages for this repo must be pullable with `GITHUB_TOKEN` (default for th
 | Backend CORS | `CORS_ORIGINS=` the Studio origin (e.g. `http://YOUR_IP:3001`) |
 | Frontend | `NEXT_PUBLIC_API_URL=` the public API URL, then rebuild |
 | Docker | `.env.docker` from `.env.docker.example`; `docker compose --env-file .env.docker up --build` |
-| AWS EC2 | GitHub Actions `deploy-aws` (see [AWS CD](#aws-cd-ec2)); SG ports **22**, **8000**, **3001** |
+| AWS EC2 | GitHub Actions `deploy-aws` (see [AWS CD](#aws-cd-ec2)); SG ports **22**, **80** |
 | Oracle Free VM | Open firewall ports **8000** and **3001**; rebuild frontend after changing the public API URL |
 
 Restart the API after code pulls unless `UVICORN_RELOAD=1`. Full checklist: [DOCUMENTATION.txt](DOCUMENTATION.txt) §16.

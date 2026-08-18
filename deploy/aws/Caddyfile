@@ -1,0 +1,19 @@
+# Public edge — one URL, no :3001 / :8000 on the internet.
+# Studio:  http://<host>/
+# API:     http://<host>/docs  http://<host>/health
+:80 {
+	encode gzip
+
+	@api {
+		path /health /docs /docs/* /redoc /redoc/* /openapi.json
+		path /generate/* /parse/* /meta/*
+	}
+
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3001
+	}
+}

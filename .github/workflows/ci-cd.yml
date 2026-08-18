@@ -103,7 +103,7 @@ jobs:
       contents: read
       packages: write
     env:
-      PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || (vars.AWS_PUBLIC_HOST != '' && format('http://{0}:8000', vars.AWS_PUBLIC_HOST)) || 'http://localhost:8000' }}
+      PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || (vars.AWS_PUBLIC_HOST != '' && format('http://{0}', vars.AWS_PUBLIC_HOST)) || 'http://localhost:8000' }}
     steps:
       - uses: actions/checkout@v5
       - uses: docker/login-action@v4
@@ -133,10 +133,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    environment:
+      name: production
+      url: http://${{ vars.AWS_PUBLIC_HOST }}
     env:
       AWS_HOST: ${{ vars.AWS_PUBLIC_HOST }}
       AWS_USER: ${{ vars.AWS_EC2_USER || 'ubuntu' }}
-      PUBLIC_API_URL: ${{ format('http://{0}:8000', vars.AWS_PUBLIC_HOST) }}
+      PUBLIC_API_URL: ${{ format('http://{0}', vars.AWS_PUBLIC_HOST) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -202,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh midigen-aws 'test -d /opt/midigen || { echo "Missing /opt/midigen — run deploy/aws/setup-ec2.sh on the VM first"; exit 1; }'
-          scp deploy/aws/docker-compose.yml deploy/aws/remote-deploy.sh midigen-aws:/opt/midigen/
+          scp deploy/aws/docker-compose.yml deploy/aws/Caddyfile deploy/aws/remote-deploy.sh midigen-aws:/opt/midigen/
           ssh midigen-aws "chmod +x /opt/midigen/remote-deploy.sh"
 
       - name: Write env and start containers
@@ -212,9 +215,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' \
             "MIDI_IMAGE_TAG=${GITHUB_SHA}" \
-            "CORS_ORIGINS=http://${AWS_HOST}:3001,http://${AWS_HOST}:8000,http://127.0.0.1:3001" \
-            "BACKEND_PORT=8000" \
-            "FRONTEND_PORT=3001" \
+            "CORS_ORIGINS=http://${AWS_HOST}" \
             "PUBLIC_API_URL=${PUBLIC_API_URL}" \
             | ssh midigen-aws 'cat > /opt/midigen/.env'
           ssh midigen-aws \
@@ -223,7 +224,7 @@ jobs:
       - name: Verify public health endpoint
         run: |
           set -euo pipefail
-          curl -fsS --retry 8 --retry-delay 5 --retry-all-errors "http://${AWS_HOST}:8000/health"
+          curl -fsS --retry 8 --retry-delay 5 --retry-all-errors "http://${AWS_HOST}/health"
           echo
-          echo "Studio: http://${AWS_HOST}:3001"
-          echo "API:    http://${AWS_HOST}:8000/docs"
+          echo "Studio: http://${AWS_HOST}/"
+          echo "API:    http://${AWS_HOST}/docs"
