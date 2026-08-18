@@ -28,7 +28,7 @@ Studio UI on **:3001**, FastAPI on **:8000**. Exports SMF Type 0 (single track) 
 10. [CLI](#cli)
 11. [GitHub Actions](#github-actions)
 12. [Deploy](#deploy)
-13. [Layout](#layout)
+13. [AWS CD](#aws-cd)
 14. [Docs](#docs)
 
 ---
@@ -296,15 +296,30 @@ Repo: [github.com/wahid2015615/MIDI](https://github.com/wahid2015615/MIDI)
 | **backend-test** | pytest | Every push / pull request |
 | **frontend-test** | `npm run build:prod` | Every push / pull request |
 | **backend-image** / **frontend-image** | Push to GitHub Container Registry | `main`, `feature/midi`, or tags |
+| **deploy-aws** | SSH to EC2, pull images, run containers | Only when `AWS_DEPLOY=true` |
 
-Public repos use free standard GitHub-hosted runners (no GitLab-style account verification). Optional repo variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).
+Public repos use free standard GitHub-hosted runners. Optional variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).
 
 Images (after a successful image job):
 
 - `ghcr.io/wahid2015615/midi/backend:latest`
 - `ghcr.io/wahid2015615/midi/frontend:latest`
 
-Deploy to a VM is **manual** (`docker compose` / `docker pull`) so CI minutes stay low.
+### AWS CD (EC2)
+
+`deploy-aws` is **skipped** (pipeline stays green) until AWS is configured.
+
+1. AWS console → EC2 → Ubuntu 24.04 VM, **x86_64** (`t3.large` / 8 GB RAM minimum; 16 GB better for the 2.8 GB GGUF). 30 GB disk. Security group: **22** (your IP), **8000** and **3001** (public).
+2. SSH in and run `sudo bash deploy/aws/setup-ec2.sh` (copy the file from this repo).
+3. Optional text mode: copy `Qwen3-4B-Q4_K_M.gguf` to `/opt/midigen/models/` on the VM (not via git).
+4. GitHub → Settings → Secrets and variables → Actions:
+   - Variable `AWS_PUBLIC_HOST` = EC2 public IPv4 or DNS
+   - Variable `AWS_DEPLOY` = `true`
+   - Variable `AWS_EC2_USER` = `ubuntu` (skip if Ubuntu AMI)
+   - Secret `EC2_SSH_KEY` = full private key (`BEGIN` … `END`)
+5. Push to `feature/midi` (or **Run workflow**). After deploy: `http://<AWS_PUBLIC_HOST>:3001` and `http://<AWS_PUBLIC_HOST>:8000/docs`.
+
+GHCR packages for this repo must be pullable with `GITHUB_TOKEN` (default for the same repository). If pull fails, set the package visibility to **Public** (Package settings).
 
 ---
 
@@ -317,6 +332,7 @@ Deploy to a VM is **manual** (`docker compose` / `docker pull`) so CI minutes st
 | Backend CORS | `CORS_ORIGINS=` the Studio origin (e.g. `http://YOUR_IP:3001`) |
 | Frontend | `NEXT_PUBLIC_API_URL=` the public API URL, then rebuild |
 | Docker | `.env.docker` from `.env.docker.example`; `docker compose --env-file .env.docker up --build` |
+| AWS EC2 | GitHub Actions `deploy-aws` (see [AWS CD](#aws-cd-ec2)); SG ports **22**, **8000**, **3001** |
 | Oracle Free VM | Open firewall ports **8000** and **3001**; rebuild frontend after changing the public API URL |
 
 Restart the API after code pulls unless `UVICORN_RELOAD=1`. Full checklist: [DOCUMENTATION.txt](DOCUMENTATION.txt) §16.
@@ -331,7 +347,8 @@ MIDI/
 ├── README.md                 # This file
 ├── docker-compose.yml
 ├── .env.docker.example
-├── .github/workflows/ci.yml  # GitHub Actions (test + GHCR push)
+├── .github/workflows/ci.yml  # GitHub Actions (test + GHCR + optional AWS CD)
+├── deploy/aws/               # EC2 compose + setup/deploy scripts
 ├── .gitlab-ci.yml            # GitLab CI (legacy)
 ├── start-backend.bat
 ├── start-frontend.bat

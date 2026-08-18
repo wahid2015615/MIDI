@@ -1,0 +1,54 @@
+# MIDIgen on AWS EC2 — pull GHCR images (no local build)
+#
+# First-time host setup: sudo bash deploy/aws/setup-ec2.sh
+# CD copies this file to /opt/midigen and runs remote-deploy.sh
+
+name: midigen
+
+services:
+  backend:
+    image: ghcr.io/wahid2015615/midi/backend:${MIDI_IMAGE_TAG:-latest}
+    pull_policy: always
+    container_name: midigen-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      UVICORN_RELOAD: "0"
+      LOCAL_N_GPU_LAYERS: "0"
+      LOCAL_MODEL_PATH: /app/models/Qwen3-4B-Q4_K_M.gguf
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.3}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-3072}
+      LOCAL_N_CTX: ${LOCAL_N_CTX:-4096}
+      MODEL_IDLE_UNLOAD_SECONDS: ${MODEL_IDLE_UNLOAD_SECONDS:-120}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      MIDIGEN_API_TOKEN: ${MIDIGEN_API_TOKEN:-}
+      GENERATED_ARCHIVE_MAX: ${GENERATED_ARCHIVE_MAX:-200}
+    volumes:
+      - ./models:/app/models:ro
+      - midigen_generated:/app/generated
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
+  frontend:
+    image: ghcr.io/wahid2015615/midi/frontend:${MIDI_IMAGE_TAG:-latest}
+    pull_policy: always
+    container_name: midigen-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3001}:3001"
+    environment:
+      PORT: "3001"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  midigen_generated:

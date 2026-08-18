@@ -1,10 +1,13 @@
-# MIDIgen — GitHub Actions (public repo: free standard runners)
+# MIDIgen — GitHub Actions
 #
-# Jobs: test → build (push images to GitHub Container Registry)
-# Deploy to Oracle Free VM stays manual so CI minutes stay low.
+# test → build images (GHCR) → optional AWS EC2 deploy
 #
-# Optional repo variable (Settings → Secrets and variables → Actions):
-#   NEXT_PUBLIC_API_URL — public API URL baked into the frontend image
+# AWS CD stays skipped (green) until you set:
+#   Variables: AWS_DEPLOY=true, AWS_PUBLIC_HOST=<ec2-ip-or-dns>
+#              AWS_EC2_USER=ubuntu   (optional, default ubuntu)
+#   Secret:    EC2_SSH_KEY           (full PEM / OpenSSH private key)
+# One-time on the VM: sudo bash deploy/aws/setup-ec2.sh
+# Optional: copy Qwen3-4B-Q4_K_M.gguf to /opt/midigen/models/ for text mode.
 
 name: CI
 
@@ -13,10 +16,11 @@ on:
     branches: [main, master, feature/midi]
     tags: ["*"]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   BACKEND_IMAGE: ghcr.io/wahid2015615/midi/backend
@@ -69,7 +73,7 @@ jobs:
 
   backend-image:
     needs: backend-test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,11 +96,13 @@ jobs:
 
   frontend-image:
     needs: frontend-test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || (vars.AWS_PUBLIC_HOST != '' && format('http://{0}:8000', vars.AWS_PUBLIC_HOST)) || 'http://localhost:8000' }}
     steps:
       - uses: actions/checkout@v5
       - uses: docker/login-action@v4
@@ -110,7 +116,113 @@ jobs:
           context: ./frontend
           push: true
           build-args: |
-            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL || 'http://localhost:8000' }}
+            NEXT_PUBLIC_API_URL=${{ env.PUBLIC_API_URL }}
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
             ${{ env.FRONTEND_IMAGE }}:latest
+
+  deploy-aws:
+    name: deploy-aws
+    needs: [backend-image, frontend-image]
+    if: >
+      vars.AWS_DEPLOY == 'true' &&
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      AWS_HOST: ${{ vars.AWS_PUBLIC_HOST }}
+      AWS_USER: ${{ vars.AWS_EC2_USER || 'ubuntu' }}
+      PUBLIC_API_URL: ${{ format('http://{0}:8000', vars.AWS_PUBLIC_HOST) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate AWS settings
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          err=0
+          if [ -z "$AWS_HOST" ]; then
+            echo "::error::Set repository variable AWS_PUBLIC_HOST to the EC2 public IPv4 or DNS"
+            err=1
+          fi
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::Set repository secret EC2_SSH_KEY to the instance private key (BEGIN...END)"
+            err=1
+          fi
+          exit "$err"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Rebuild frontend image for this EC2 API URL
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ env.PUBLIC_API_URL }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          if ! grep -q "BEGIN" "$HOME/.ssh/deploy_key"; then
+            echo "::error::EC2_SSH_KEY must include the BEGIN / END lines of the private key"
+            exit 1
+          fi
+          cat > "$HOME/.ssh/config" <<EOF
+          Host midigen-aws
+            HostName ${AWS_HOST}
+            User ${AWS_USER}
+            IdentityFile ${HOME}/.ssh/deploy_key
+            StrictHostKeyChecking accept-new
+            BatchMode yes
+            ConnectTimeout 20
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Copy compose files to EC2
+        run: |
+          set -euo pipefail
+          ssh midigen-aws 'test -d /opt/midigen || { echo "Missing /opt/midigen — run deploy/aws/setup-ec2.sh on the VM first"; exit 1; }'
+          scp deploy/aws/docker-compose.yml deploy/aws/remote-deploy.sh midigen-aws:/opt/midigen/
+          ssh midigen-aws "chmod +x /opt/midigen/remote-deploy.sh"
+
+      - name: Write env and start containers
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "MIDI_IMAGE_TAG=${GITHUB_SHA}" \
+            "CORS_ORIGINS=http://${AWS_HOST}:3001,http://${AWS_HOST}:8000,http://127.0.0.1:3001" \
+            "BACKEND_PORT=8000" \
+            "FRONTEND_PORT=3001" \
+            "PUBLIC_API_URL=${PUBLIC_API_URL}" \
+            | ssh midigen-aws 'cat > /opt/midigen/.env'
+          ssh midigen-aws \
+            "export GHCR_USER='${GITHUB_ACTOR}' GHCR_TOKEN='${GHCR_TOKEN}' MIDI_IMAGE_TAG='${GITHUB_SHA}'; bash /opt/midigen/remote-deploy.sh"
+
+      - name: Verify public health endpoint
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 8 --retry-delay 5 --retry-all-errors "http://${AWS_HOST}:8000/health"
+          echo
+          echo "Studio: http://${AWS_HOST}:3001"
+          echo "API:    http://${AWS_HOST}:8000/docs"
