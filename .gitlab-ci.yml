@@ -48,7 +48,6 @@ backend:test:
     key:
       files:
         - backend/requirements-dev.txt
-        - backend/requirements.txt
         - backend/pyproject.toml
     paths:
       - .cache/pip

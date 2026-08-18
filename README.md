@@ -26,7 +26,7 @@ Studio UI on **:3001**, FastAPI on **:8000**. Exports SMF Type 0 (single track) 
 8. [Configuration](#configuration)
 9. [HTTP API](#http-api)
 10. [CLI](#cli)
-11. [GitLab CI/CD](#gitlab-cicd)
+11. [GitHub Actions](#github-actions)
 12. [Deploy](#deploy)
 13. [Layout](#layout)
 14. [Docs](#docs)
@@ -285,23 +285,24 @@ Outputs land in `backend/samples/`. Text samples need the GGUF; chords/notes do 
 
 ---
 
-## GitLab CI/CD
+## GitHub Actions
 
-File: [`.gitlab-ci.yml`](.gitlab-ci.yml)
+File: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 
-| Stage | Jobs | When |
-| ----- | ---- | ---- |
-| **test** | `backend:test` (pytest), `frontend:test` (`npm run build:prod`) | Every branch / MR |
-| **build** | `backend:image`, `frontend:image` → GitLab Container Registry | Default branch, `feature/MIDI`, or tags |
+Repo: [github.com/wahid2015615/MIDI](https://github.com/wahid2015615/MIDI)
 
-GitLab.com shared runners need an **account verification** (phone or card). If that is blocked, register a **self-hosted runner** (your PC or Oracle VM) so jobs run locally and do not use the 400 free compute minutes.
+| Job | What | When |
+| --- | ---- | ---- |
+| **backend-test** | pytest | Every push / pull request |
+| **frontend-test** | `npm run build:prod` | Every push / pull request |
+| **backend-image** / **frontend-image** | Push to GitHub Container Registry | `main`, `feature/midi`, or tags |
 
-Enable **Container Registry** on the project (Settings → General → Visibility). Optional CI variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).
+Public repos use free standard GitHub-hosted runners (no GitLab-style account verification). Optional repo variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).
 
-Images (after a successful build job):
+Images (after a successful image job):
 
-- `registry.gitlab.com/<namespace>/midi/backend:latest`
-- `registry.gitlab.com/<namespace>/midi/frontend:latest`
+- `ghcr.io/wahid2015615/midi/backend:latest`
+- `ghcr.io/wahid2015615/midi/frontend:latest`
 
 Deploy to a VM is **manual** (`docker compose` / `docker pull`) so CI minutes stay low.
 
@@ -330,7 +331,8 @@ MIDI/
 ├── README.md                 # This file
 ├── docker-compose.yml
 ├── .env.docker.example
-├── .gitlab-ci.yml
+├── .github/workflows/ci.yml  # GitHub Actions (test + GHCR push)
+├── .gitlab-ci.yml            # GitLab CI (legacy)
 ├── start-backend.bat
 ├── start-frontend.bat
 ├── backend/                  # FastAPI + MidiEngine + local GGUF (text)
