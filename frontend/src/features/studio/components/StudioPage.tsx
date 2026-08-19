@@ -13,6 +13,7 @@ import {
   parseTextPrompt,
   resolveApiBase,
 } from "../api/studioApi";
+import { MidiResultCard } from "./MidiResultCard";
 import {
   BARS_DEFAULT,
   BARS_MAX,
@@ -47,8 +48,10 @@ import {
   TS_NUMERATOR_MIN,
   type TsDenominator,
 } from "../constants";
-import type { Mode, TrackRole } from "../types";
+import type { Mode, StudioMidiResult, TrackRole } from "../types";
 import { Field } from "../../../shared/ui/Field";
+import { IconSelect } from "../../../shared/ui/IconSelect";
+import { TypeIcon } from "../../../shared/ui/TypeIcon";
 
 /** Mirror backend `parse_progression_string` (incl. jazz hyphen repair). */
 function splitChordProgression(text: string): string[] {
@@ -204,6 +207,18 @@ export default function StudioPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [midiResult, setMidiResult] = useState<StudioMidiResult | null>(null);
+  const midiUrlRef = useRef<string | null>(null);
+  const resultCardRef = useRef<HTMLDivElement | null>(null);
+
+  function replaceMidiResult(next: StudioMidiResult | null) {
+    if (midiUrlRef.current) {
+      URL.revokeObjectURL(midiUrlRef.current);
+      midiUrlRef.current = null;
+    }
+    if (next) midiUrlRef.current = next.url;
+    setMidiResult(next);
+  }
 
   const [prompt, setPrompt] = useState(
     "Generate a 16-bar uplifting piano melody in C Major at 128 BPM.",
@@ -462,6 +477,10 @@ export default function StudioPage() {
       const pendingId = requestIdRef.current;
       void cancelGenerationRequest(String(pendingId));
       abortRef.current?.abort();
+      if (midiUrlRef.current) {
+        URL.revokeObjectURL(midiUrlRef.current);
+        midiUrlRef.current = null;
+      }
     };
   }, []);
 
@@ -964,16 +983,43 @@ export default function StudioPage() {
           { signal },
         );
       }
-      if (requestId !== requestIdRef.current) return;
-      setSuccess(
-        `Downloaded ${result.filename}` +
-          (result.bpm ? ` · ${result.bpm} BPM` : "") +
-          (result.timeSig ? ` · ${result.timeSig}` : "") +
-          (result.key ? ` · ${result.key}` : "") +
-          (result.bars ? ` · ${result.bars} bars` : "") +
-          (result.tracks ? ` · ${result.tracks} tracks` : ""),
-      );
+      if (requestId !== requestIdRef.current) {
+        URL.revokeObjectURL(result.url);
+        return;
+      }
+      const quote =
+        mode === "text"
+          ? prompt.trim()
+          : mode === "chords"
+            ? progression.trim()
+            : notesText
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .slice(0, 4)
+                .join(" · ");
+      const selectedBars =
+        mode === "text"
+          ? safeBars
+          : mode === "chords"
+            ? chordParts.length * safeBarsPerChord
+            : estimateNotesBars(notesText, beatsPerBar);
+      replaceMidiResult({
+        ...result,
+        mode,
+        quote,
+        selectedBpm: safeBpm,
+        selectedKey: key,
+        selectedTimeSig: `${safeTs.numerator}/${safeTs.denominator}`,
+        selectedBars,
+        style: mode === "text" ? safeStyle : undefined,
+        mood: mode === "text" ? safeMood : undefined,
+      });
+      setSuccess(null);
       if (needsAi) setAiLoaded(true);
+      window.requestAnimationFrame(() => {
+        resultCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
       if (isAbortError(err)) {
@@ -1000,6 +1046,239 @@ export default function StudioPage() {
     setSolo({ melody: false, chords: false, bass: false, drums: false });
   }
 
+  function applyTextHappyPiano() {
+    lockPresetFields();
+    setPrompt("Create a happy piano melody in C Major, 120 BPM, 8 bars.");
+    setBpm(120);
+    setBars(8);
+    setKey("C Major");
+    setMood("Happy");
+    setStyle("Pop");
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "acoustic_grand_piano",
+    }));
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: false,
+    });
+    clearSolos();
+    applyStockFilename("text_happy_piano.mid");
+  }
+
+  function applyTextSadViolin() {
+    lockPresetFields();
+    setPrompt(
+      "Make a sad violin melody in A Minor, 90 BPM, 8 bars, cinematic mood.",
+    );
+    setBpm(90);
+    setBars(8);
+    setKey("A Minor");
+    setMood("Sad");
+    setStyle("Classical");
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "violin",
+      chords: "string_ensemble_1",
+    }));
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: false,
+      drums: false,
+    });
+    clearSolos();
+    applyStockFilename("text_sad_violin.mid");
+  }
+
+  function applyTextLofiTags() {
+    lockPresetFields();
+    setPrompt("lo-fi hip hop, 80 BPM, dusty electric piano, 16 bars");
+    setBpm(80);
+    setBars(16);
+    setKey("F Major");
+    setMood("Calm");
+    setStyle("Lo-Fi");
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "electric_piano_1",
+      chords: "electric_piano_1",
+    }));
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: true,
+    });
+    clearSolos();
+    applyStockFilename("text_output.mid");
+  }
+
+  function applyTextEdmStructured() {
+    lockPresetFields();
+    setPrompt(
+      "Genre: EDM. Key: F Minor. 16 bars at 128 BPM. Big drop, then breakdown.",
+    );
+    setBpm(128);
+    setBars(16);
+    setKey("F Minor");
+    setMood("Energetic");
+    setStyle("EDM");
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "lead_1_square",
+      chords: "string_ensemble_1",
+      bass: "electric_bass_finger",
+    }));
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: true,
+    });
+    clearSolos();
+    applyStockFilename("text_output.mid");
+  }
+
+  function applyChordsPipe() {
+    setProgression("C | G | Am | F");
+    setBpm(120);
+    setKey("C Major");
+    setBarsPerChord(1);
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: true,
+    });
+    clearSolos();
+    applyStockFilename("chords_progression.mid");
+  }
+
+  function applyChordsDash() {
+    setProgression("Am - F - C - G");
+    setBpm(100);
+    setKey("A Minor");
+    setBarsPerChord(1);
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: false,
+    });
+    clearSolos();
+    applyStockFilename("chords_progression.mid");
+  }
+
+  function applyChordsArrow() {
+    setProgression("D -> A -> Bm -> G");
+    setBpm(118);
+    setKey("D Major");
+    setBarsPerChord(2);
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: false,
+    });
+    clearSolos();
+    applyStockFilename("chords_progression.mid");
+  }
+
+  function applyChordsJazz() {
+    setProgression("Cmaj7, Am7, Dm7, G7");
+    setBpm(92);
+    setKey("C Major");
+    setBarsPerChord(1);
+    setTracks({
+      melody: true,
+      chords: true,
+      bass: true,
+      drums: false,
+    });
+    clearSolos();
+    applyStockFilename("chords_progression.mid");
+  }
+
+  function applyNotesMelody() {
+    setBpm(120);
+    setKey("C Major");
+    setNotesText(
+      ["C4 q", "E4 q", "G4 h", "rest q", "C5 q", "B4 q", "A4 h"].join("\n"),
+    );
+    setQuantize("");
+    setHumanize(false);
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "acoustic_grand_piano",
+    }));
+    clearSolos();
+    applyStockFilename("notes_list.mid");
+  }
+
+  function applyNotesChordTones() {
+    setBpm(96);
+    setKey("C Major");
+    setNotesText(
+      ["C4 E4 G4 q", "F4 A4 C5 q", "G3 B3 D4 q", "C4 E4 G4 h"].join("\n"),
+    );
+    setQuantize("");
+    setHumanize(false);
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "electric_piano_1",
+    }));
+    clearSolos();
+    applyStockFilename("notes_list.mid");
+  }
+
+  function applyNotesVelocity() {
+    setBpm(110);
+    setKey("A Minor");
+    setNotesText(
+      [
+        "A3 q 70",
+        "C4 e 90",
+        "E4 e 110",
+        "rest q",
+        "A4 h 80",
+      ].join("\n"),
+    );
+    setQuantize("");
+    setHumanize(false);
+    setTrackInstrument((t) => ({
+      ...t,
+      melody: "violin",
+    }));
+    clearSolos();
+    applyStockFilename("notes_list.mid");
+  }
+
+  function applyNotesMultiTrack() {
+    setBpm(100);
+    setKey("C Major");
+    setNotesText(
+      [
+        "@track Chords electric_piano_1",
+        "C4 E4 G4 q",
+        "F4 A4 C5 q",
+        "@track Melody flute",
+        "G5 e",
+        "A5 e",
+        "G5 q",
+        "@track Bass acoustic_bass",
+        "C2 q",
+        "F2 q",
+      ].join("\n"),
+    );
+    setQuantize("");
+    setHumanize(false);
+    clearSolos();
+    applyStockFilename("notes_list.mid");
+  }
+
   const anySolo = TRACK_META.some(({ id }) => {
     const included =
       mode === "notes" ? notesTrackRoles.has(id) : tracks[id];
@@ -1007,7 +1286,12 @@ export default function StudioPage() {
   });
 
   return (
-    <main className="mx-auto min-h-screen max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:px-8">
+    <main className="studio-shell mx-auto min-h-screen max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:px-8">
+      <div className="studio-ambient" aria-hidden>
+        <span className="orb orb-a" />
+        <span className="orb orb-b" />
+        <span className="orb orb-c" />
+      </div>
       {/* Top bar */}
       <header className="animate-rise mb-6 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
@@ -1015,7 +1299,7 @@ export default function StudioPage() {
             <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-[var(--signal)]">
               DAW-ready · Standard MIDI
             </p>
-            <h1 className="brand text-4xl leading-none text-[var(--ink)] sm:text-5xl">
+            <h1 className="brand text-4xl leading-none sm:text-5xl">
               MIDIgen
             </h1>
           </div>
@@ -1027,12 +1311,12 @@ export default function StudioPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span
-            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${
+            className={`status-chip ${
               apiOk
-                ? "border-[#b7e4c7] bg-[#e8f8ef] text-[var(--ok)]"
+                ? "status-chip-ok"
                 : apiOk === false
-                  ? "border-[#f3c1bc] bg-[#fdecea] text-[var(--danger)]"
-                  : "border-[var(--line)] bg-white text-[var(--muted)]"
+                  ? "status-chip-bad"
+                  : ""
             }`}
           >
             <span
@@ -1050,12 +1334,12 @@ export default function StudioPage() {
             {apiOk === false && `API offline · ${apiDisplayBase}`}
           </span>
           <span
-            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${
+            className={`status-chip ${
               aiConfigured && aiLoaded
-                ? "border-[var(--signal-soft)] bg-[var(--signal-soft)] text-[var(--accent-deep)]"
+                ? "status-chip-ok"
                 : aiConfigured && aiOnline !== false
-                  ? "border-[#fde68a] bg-[#fffbeb] text-[#92400e]"
-                  : "border-[var(--line)] bg-white text-[var(--muted)]"
+                  ? "status-chip-warn"
+                  : ""
             }`}
           >
             {aiConfigured === null && "Checking model"}
@@ -1079,8 +1363,19 @@ export default function StudioPage() {
         </div>
       </header>
 
-      <div className="animate-rise-delay grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <form onSubmit={onSubmit} className="space-y-5">
+      {midiResult ? (
+        <div ref={resultCardRef} className="mb-8 mt-2">
+          <MidiResultCard
+            result={midiResult}
+            onCreateAnother={() => {
+              replaceMidiResult(null);
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+          />
+        </div>
+      ) : (
+      <div className="animate-rise-delay">
+        <form onSubmit={onSubmit} className="studio-form space-y-5">
           {/* Mode + input */}
           <section className="section-card p-5 sm:p-6">
             <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -1105,12 +1400,13 @@ export default function StudioPage() {
                     role="radio"
                     aria-checked={mode === id}
                     onClick={() => setModeAndMaybeFilename(id)}
-                    className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                    className={`mode-tab rounded-lg px-4 py-2 text-sm font-semibold transition ${
                       mode === id
-                        ? "bg-[var(--ink)] text-white shadow-sm"
+                        ? "bg-[var(--accent)] text-white shadow-sm"
                         : "text-[var(--muted)] hover:text-[var(--ink)]"
                     }`}
                   >
+                    <TypeIcon kind="mode" name={id} />
                     {label}
                   </button>
                 ))}
@@ -1118,64 +1414,228 @@ export default function StudioPage() {
             </div>
 
             {mode === "text" && (
-              <label className="block">
-                <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
-                  Prompt — mood · instrument · key · BPM · bars
-                </span>
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  rows={3}
-                  maxLength={8000}
-                  className="field-input resize-y"
-                  placeholder="Make a sad violin melody in A Minor, 90 BPM, 8 bars, cinematic mood."
-                  required
-                />
-              </label>
+              <div className="mode-swap">
+                <label className="block">
+                  <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
+                    Prompt — mood · instrument · key · BPM · bars
+                  </span>
+                  <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    rows={3}
+                    maxLength={8000}
+                    className="field-input resize-y"
+                    placeholder="Make a sad violin melody in A Minor, 90 BPM, 8 bars, cinematic mood."
+                    required
+                  />
+                </label>
+                <div className="preset-examples">
+                  <p className="preset-examples-label">Text examples</p>
+                  <div className="preset-examples-grid">
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyTextHappyPiano}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mood" name="Happy" />
+                        Sentence prompt
+                      </span>
+                      <span className="mt-1 block text-xs text-[var(--muted)]">
+                        “Create a happy piano melody in C Major…”
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyTextSadViolin}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mood" name="Sad" />
+                        Mood + instrument
+                      </span>
+                      <span className="mt-1 block text-xs text-[var(--muted)]">
+                        Sad violin · A Minor · cinematic
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyTextLofiTags}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="style" name="Lo-Fi" />
+                        Short tags
+                      </span>
+                      <span className="mt-1 block text-xs text-[var(--muted)]">
+                        lo-fi hip hop, 80 BPM, dusty piano
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyTextEdmStructured}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="style" name="EDM" />
+                        Structured fields
+                      </span>
+                      <span className="mt-1 block text-xs text-[var(--muted)]">
+                        Genre: EDM. Key: F Minor. 16 bars.
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
 
             {mode === "chords" && (
-              <label className="block">
-                <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
-                  Progression
-                </span>
-                <input
-                  value={progression}
-                  onChange={(e) => setProgression(e.target.value)}
-                  className="field-input text-lg tracking-wide"
-                  placeholder="C | G | Am | F"
-                  required
-                />
-                <p className="mt-2 text-xs text-[var(--muted)]">
-                  Exact MIDI from chord symbols (no AI). Formats:{" "}
-                  <code>C | G | Am | F</code>, <code>C - G - Am - F</code>, etc.
-                  Qualities: maj, m, 7, maj7, m7, sus, dim, 9, m7b5, 7b9, slash{" "}
-                  <code>C/G</code>…
-                </p>
-              </label>
+              <div className="mode-swap">
+                <label className="block">
+                  <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
+                    Progression
+                  </span>
+                  <input
+                    value={progression}
+                    onChange={(e) => setProgression(e.target.value)}
+                    className="field-input text-lg tracking-wide"
+                    placeholder="C | G | Am | F"
+                    required
+                  />
+                </label>
+                <div className="preset-examples">
+                  <p className="preset-examples-label">Chord examples</p>
+                  <div className="preset-examples-grid">
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyChordsPipe}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="chords" />
+                        Pipe bars
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        C | G | Am | F
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyChordsDash}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="chords" />
+                        Dashes
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        Am - F - C - G
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyChordsArrow}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="chords" />
+                        Arrows
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        D -&gt; A -&gt; Bm -&gt; G
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyChordsJazz}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="style" name="Jazz" />
+                        Comma jazz
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        Cmaj7, Am7, Dm7, G7
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
 
             {mode === "notes" && (
-              <label className="block">
-                <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
-                  Sheet Music / Note Data Input
-                </span>
-                <textarea
-                  value={notesText}
-                  onChange={(e) => setNotesText(e.target.value)}
-                  rows={8}
-                  className="field-input resize-y font-mono text-sm"
-                  placeholder={"C4 q\nE4 q\nG4 h\nrest q\nC5 q\nB4 q\nA4 h"}
-                  required
-                />
-                <p className="mt-2 text-xs text-[var(--muted)]">
-                  Format: <code>C4 q</code>, same-beat chord{" "}
-                  <code>C4 E4 G4 q</code>, <code>rest q</code>. Durations:{" "}
-                  <code>w h q e s</code> (whole / half / quarter / eighth /
-                  sixteenth). Optional velocity: <code>C4 q 90</code>. Multi-track:{" "}
-                  <code>@track Bass</code>.
-                </p>
-              </label>
+              <div className="mode-swap">
+                <label className="block">
+                  <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
+                    Sheet Music / Note Data Input
+                  </span>
+                  <textarea
+                    value={notesText}
+                    onChange={(e) => setNotesText(e.target.value)}
+                    rows={8}
+                    className="field-input resize-y font-mono text-sm"
+                    placeholder={"C4 q\nE4 q\nG4 h\nrest q\nC5 q\nB4 q\nA4 h"}
+                    required
+                  />
+                </label>
+                <div className="preset-examples">
+                  <p className="preset-examples-label">Notes examples</p>
+                  <div className="preset-examples-grid">
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyNotesMelody}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="notes" />
+                        One note / line
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        C4 q · E4 q · G4 h · rest q
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyNotesChordTones}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="notes" />
+                        Same-beat chord
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        C4 E4 G4 q
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyNotesVelocity}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="notes" />
+                        Velocity + rest
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        A3 q 70 · C4 e 90 · rest q
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost rounded-xl px-3 py-3 text-left"
+                      onClick={applyNotesMultiTrack}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                        <TypeIcon kind="mode" name="notes" />
+                        @track multi
+                      </span>
+                      <span className="mt-1 block font-mono text-xs text-[var(--muted)]">
+                        @track Chords · Melody · Bass
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
 
             <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1251,7 +1711,7 @@ export default function StudioPage() {
                     type="button"
                     title="New random seed"
                     onClick={() => setSeed(Math.floor(Math.random() * 100000))}
-                    className="rounded-lg border border-[var(--line)] bg-white px-2 text-xs font-semibold text-[var(--muted)]"
+                    className="btn-ghost rounded-lg px-2 text-xs font-semibold"
                   >
                     Rnd
                   </button>
@@ -1315,48 +1775,42 @@ export default function StudioPage() {
               {mode === "text" && (
                 <>
                   <Field label="Mood">
-                    <select
+                    <IconSelect
+                      kind="mood"
                       value={mood}
-                      onChange={(e) => {
+                      options={moodOptions}
+                      ariaLabel="Mood"
+                      onChange={(next) => {
                         markTouched("mood");
-                        setMood(e.target.value);
+                        setMood(next);
                       }}
-                      className="field-input"
-                    >
-                      {moodOptions.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </Field>
                   <Field label="Style">
-                    <select
+                    <IconSelect
+                      kind="style"
                       value={style}
-                      onChange={(e) => {
+                      options={styleOptions}
+                      ariaLabel="Style"
+                      onChange={(next) => {
                         markTouched("style");
-                        setStyle(e.target.value);
+                        setStyle(next);
                       }}
-                      className="field-input"
-                    >
-                      {styleOptions.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </Field>
                 </>
               )}
               <Field label="MIDI type">
-                <select
-                  value={fileType}
-                  onChange={(e) => setFileType(Number(e.target.value) as 0 | 1)}
-                  className="field-input"
-                >
-                  <option value={1}>Type 1 · multi-track</option>
-                  <option value={0}>Type 0 · single track</option>
-                </select>
+                <IconSelect
+                  kind="midiType"
+                  value={String(fileType)}
+                  options={["1", "0"]}
+                  ariaLabel="MIDI type"
+                  getLabel={(v) =>
+                    v === "0" ? "Type 0 · single track" : "Type 1 · multi-track"
+                  }
+                  onChange={(next) => setFileType(Number(next) as 0 | 1)}
+                />
               </Field>
               <Field label="Filename">
                 <input
@@ -1393,7 +1847,7 @@ export default function StudioPage() {
                 <button
                   type="button"
                   onClick={clearSolos}
-                  className="rounded-lg border border-[var(--warn)] bg-[#fff7ed] px-3 py-1.5 text-xs font-bold text-[var(--warn)]"
+                  className="rounded-lg border border-[var(--warn)] bg-[rgba(251,191,36,0.12)] px-3 py-1.5 text-xs font-bold text-[var(--warn)]"
                 >
                   Clear solos ({activeTrackCount} exporting)
                 </button>
@@ -1424,10 +1878,10 @@ export default function StudioPage() {
                         return { ...t, [id]: nextOn };
                       });
                     }}
-                    className={`rounded-full px-3.5 py-1.5 text-sm font-semibold transition disabled:cursor-default ${
+                    className={`track-pill rounded-full px-3.5 py-1.5 text-sm font-semibold transition disabled:cursor-default ${
                       on
                         ? "text-white"
-                        : "bg-white text-[var(--muted)] ring-1 ring-[var(--line)]"
+                        : "bg-[var(--field)] text-[var(--muted)] ring-1 ring-[var(--line)]"
                     }`}
                     style={on ? { background: color } : undefined}
                     title={
@@ -1436,6 +1890,7 @@ export default function StudioPage() {
                         : undefined
                     }
                   >
+                    <TypeIcon kind="track" name={id} />
                     {label}
                   </button>
                 );
@@ -1443,7 +1898,7 @@ export default function StudioPage() {
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-[var(--line)]">
-              <table className="w-full min-w-[720px] border-collapse text-sm">
+              <table className="mixer-table w-full min-w-[720px] border-collapse text-sm">
                 <thead>
                   <tr className="bg-[var(--glow)] text-left text-[11px] font-bold uppercase tracking-[0.08em] text-[var(--muted)]">
                     <th className="px-3 py-2.5">Track</th>
@@ -1463,7 +1918,7 @@ export default function StudioPage() {
                     return (
                       <tr
                         key={id}
-                        className={`border-t border-[var(--line)] bg-white/80 ${
+                        className={`border-t border-[var(--line)] bg-[var(--field)]/60 ${
                           inactive ? "opacity-45" : ""
                         }`}
                       >
@@ -1473,31 +1928,30 @@ export default function StudioPage() {
                               className="h-2.5 w-2.5 rounded-full"
                               style={{ background: color }}
                             />
+                            <TypeIcon kind="track" name={id} />
                             {label}
                           </div>
                         </td>
                         <td className="px-3 py-2">
-                          <select
+                          <IconSelect
+                            kind="instrument"
                             value={trackInstrument[id]}
                             disabled={inactive}
-                            onChange={(e) => {
+                            ariaLabel={`${label} instrument`}
+                            getLabel={labelize}
+                            options={
+                              id === "drums"
+                                ? instrumentOptions
+                                : instrumentOptions.filter((opt) => !isDrumInstrument(opt))
+                            }
+                            onChange={(next) => {
                               if (id === "melody") markTouched("instrument");
                               setTrackInstrument((p) => ({
                                 ...p,
-                                [id]: e.target.value,
+                                [id]: next,
                               }));
                             }}
-                            className="field-input py-1.5 text-sm"
-                          >
-                            {(id === "drums"
-                              ? instrumentOptions
-                              : instrumentOptions.filter((opt) => !isDrumInstrument(opt))
-                            ).map((opt) => (
-                              <option key={opt} value={opt}>
-                                {labelize(opt)}
-                              </option>
-                            ))}
-                          </select>
+                          />
                         </td>
                         <td className="px-3 py-2">
                           <select
@@ -1767,7 +2221,7 @@ export default function StudioPage() {
                   className={`rounded-full px-3.5 py-1.5 text-xs font-bold transition ${
                     value
                       ? "bg-[var(--signal-soft)] text-[var(--accent-deep)]"
-                      : "bg-white text-[var(--muted)] ring-1 ring-[var(--line)]"
+                      : "bg-[var(--field)] text-[var(--muted)] ring-1 ring-[var(--line)]"
                   }`}
                 >
                   {label}
@@ -1935,8 +2389,27 @@ export default function StudioPage() {
             )}
           </section>
 
+          {error && (
+            <p
+              role="alert"
+              aria-live="assertive"
+              className="anim-alert rounded-xl border border-[rgba(248,113,113,0.4)] bg-[rgba(248,113,113,0.1)] px-4 py-3 text-sm text-[var(--danger)]"
+            >
+              {error}
+            </p>
+          )}
+          {success && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="anim-alert rounded-xl border border-[rgba(52,211,153,0.35)] bg-[rgba(52,211,153,0.1)] px-4 py-3 text-sm text-[var(--ok)]"
+            >
+              {success}
+            </p>
+          )}
+
           {/* Sticky-ish generate */}
-          <div className="section-card sticky bottom-4 z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+          <div className="generate-dock section-card sticky bottom-4 z-10 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
             <div className="text-sm text-[var(--muted)]">
               <span className="font-bold text-[var(--ink)]">
                 {filename.trim() || defaultFilenameForMode(mode)}
@@ -1954,7 +2427,7 @@ export default function StudioPage() {
                 <button
                   type="button"
                   onClick={cancelGeneration}
-                  className="inline-flex min-h-12 min-w-[120px] items-center justify-center rounded-xl border border-[var(--line)] bg-white px-5 text-base font-bold text-[var(--ink)] transition hover:bg-[var(--glow)]"
+                  className="btn-ghost inline-flex min-h-12 min-w-[120px] items-center justify-center rounded-xl px-5 text-base font-bold"
                 >
                   Cancel
                 </button>
@@ -1962,7 +2435,9 @@ export default function StudioPage() {
               <button
                 type="submit"
                 disabled={generateBlocked}
-                className="generate-btn inline-flex min-h-12 min-w-[220px] items-center justify-center rounded-xl px-6 text-base font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                className={`generate-btn inline-flex min-h-12 min-w-[220px] items-center justify-center rounded-xl px-6 text-base font-bold disabled:cursor-not-allowed disabled:opacity-50${
+                  loading ? " is-loading" : ""
+                }`}
               >
                 {loading ? (
                   <span className="animate-pulse-soft">Generating MIDI…</span>
@@ -1977,219 +2452,14 @@ export default function StudioPage() {
                 ) : apiOk === false ? (
                   "API offline"
                 ) : (
-                  "Generate & download .mid"
+                  "Generate MIDI"
                 )}
               </button>
             </div>
           </div>
-
-          {error && (
-            <p
-              role="alert"
-              aria-live="assertive"
-              className="rounded-xl border border-[#f3c1bc] bg-[#fdecea] px-4 py-3 text-sm text-[var(--danger)]"
-            >
-              {error}
-            </p>
-          )}
-          {success && (
-            <p
-              role="status"
-              aria-live="polite"
-              className="rounded-xl border border-[#b7e4c7] bg-[#e8f8ef] px-4 py-3 text-sm text-[var(--ok)]"
-            >
-              {success}
-            </p>
-          )}
         </form>
-
-        {/* Sidebar */}
-        <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
-          <div className="overflow-hidden rounded-2xl bg-[var(--ink)] p-5 text-white shadow-lg">
-            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[var(--signal)]">
-              Session
-            </p>
-            <h2 className="brand mt-2 text-3xl">Session summary</h2>
-            <dl className="mt-5 space-y-3 text-sm text-[#c5d4dc]">
-              <div className="flex justify-between gap-3">
-                <dt>Mode</dt>
-                <dd className="font-semibold text-white capitalize">{mode}</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>Tempo</dt>
-                <dd className="font-semibold text-white">{bpm} BPM</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>Key</dt>
-                <dd className="font-semibold text-white">{key}</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>Est. length</dt>
-                <dd className="font-semibold text-white">~{durationSec}s</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>Tracks out</dt>
-                <dd className="font-semibold text-white">{activeTrackCount}</dd>
-              </div>
-              <div className="flex justify-between gap-3">
-                <dt>File type</dt>
-                <dd className="font-semibold text-white">Type {fileType}</dd>
-              </div>
-            </dl>
-            <div className="mt-6 h-16 overflow-hidden rounded-xl bg-[linear-gradient(110deg,#163029_0%,#1a2a38_45%,#0f766e_100%)]">
-              <div className="flex h-full items-end gap-1 px-3 pb-2 opacity-80">
-                {[40, 70, 55, 90, 60, 80, 45, 75, 95, 50, 65, 85].map((h, i) => (
-                  <span
-                    key={i}
-                    className="flex-1 rounded-sm bg-[#9ee5dc]"
-                    style={{ height: `${h}%` }}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="section-card p-5">
-            <h3 className="text-sm font-bold uppercase tracking-[0.12em] text-[var(--muted)]">
-              Quick presets
-            </h3>
-            <ul className="mt-4 space-y-2">
-              <li>
-                <button
-                  type="button"
-                  className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--signal-soft)]"
-                  onClick={() => {
-                    lockPresetFields();
-                    setMode("text");
-                    setPrompt(
-                      "Create a happy piano melody in C Major, 120 BPM, 8 bars.",
-                    );
-                    setBpm(120);
-                    setBars(8);
-                    setKey("C Major");
-                    setMood("Happy");
-                    setStyle("Pop");
-                    setTrackInstrument((t) => ({
-                      ...t,
-                      melody: "acoustic_grand_piano",
-                    }));
-                    setTracks({
-                      melody: true,
-                      chords: true,
-                      bass: true,
-                      drums: false,
-                    });
-                    clearSolos();
-                    applyStockFilename("text_happy_piano.mid");
-                  }}
-                >
-                  <span className="block text-sm font-bold text-[var(--ink)]">
-                    Happy 8-bar piano
-                  </span>
-                  <span className="text-xs text-[var(--muted)]">
-                    120 BPM · C Major · Pop
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--signal-soft)]"
-                  onClick={() => {
-                    lockPresetFields();
-                    setMode("text");
-                    setPrompt(
-                      "Make a sad violin melody in A Minor, 90 BPM, 8 bars, cinematic mood.",
-                    );
-                    setBpm(90);
-                    setBars(8);
-                    setKey("A Minor");
-                    setMood("Sad");
-                    setStyle("Classical");
-                    setTrackInstrument((t) => ({
-                      ...t,
-                      melody: "violin",
-                      chords: "string_ensemble_1",
-                    }));
-                    setTracks({
-                      melody: true,
-                      chords: true,
-                      bass: false,
-                      drums: false,
-                    });
-                    clearSolos();
-                    applyStockFilename("text_sad_violin.mid");
-                  }}
-                >
-                  <span className="block text-sm font-bold text-[var(--ink)]">
-                    Sad cinematic violin
-                  </span>
-                  <span className="text-xs text-[var(--muted)]">
-                    90 BPM · A Minor · 8 bars
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--signal-soft)]"
-                  onClick={() => {
-                    setMode("chords");
-                    setProgression("C | G | Am | F");
-                    setBpm(120);
-                    setKey("C Major");
-                    setTracks({
-                      melody: true,
-                      chords: true,
-                      bass: true,
-                      drums: true,
-                    });
-                    clearSolos();
-                    applyStockFilename("chords_progression.mid");
-                  }}
-                >
-                  <span className="block text-sm font-bold text-[var(--ink)]">
-                    C → G → Am → F + drums
-                  </span>
-                  <span className="text-xs text-[var(--muted)]">
-                    Full 4-track arrangement
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--signal-soft)]"
-                  onClick={() => {
-                    setMode("notes");
-                    setBpm(120);
-                    setNotesText(
-                      ["C4 q", "E4 q", "G4 h", "rest q", "C5 q", "B4 q", "A4 h"].join(
-                        "\n",
-                      ),
-                    );
-                    setQuantize("");
-                    setHumanize(false);
-                    setTrackInstrument((t) => ({
-                      ...t,
-                      melody: "acoustic_grand_piano",
-                    }));
-                    clearSolos();
-                    applyStockFilename("notes_list.mid");
-                  }}
-                >
-                  <span className="block text-sm font-bold text-[var(--ink)]">
-                    Sheet-style note list
-                  </span>
-                  <span className="text-xs text-[var(--muted)]">
-                    C4 q · E4 q · G4 h · exact timing
-                  </span>
-                </button>
-              </li>
-            </ul>
-          </div>
-        </aside>
       </div>
+      )}
     </main>
   );
 }

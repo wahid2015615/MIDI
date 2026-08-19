@@ -14,7 +14,7 @@ name: CI/CD
 
 on:
   push:
-    branches: [main, master, feature/midi]
+    branches: [main, master, feature/midi, feature/MIDI]
     tags: ["*"]
   pull_request:
   workflow_dispatch:
@@ -49,8 +49,12 @@ jobs:
           # Prebuilt CPU wheels avoid compiling llama-cpp-python on hosted runners.
           pip install -r requirements-dev.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
           pip install -e .
-      - name: Pytest
-        run: pytest -q --tb=short
+      - name: Unit tests
+        run: pytest -m unit --tb=short -q
+      - name: Integration tests
+        run: pytest -m integration --tb=short -q
+      - name: Security tests
+        run: pytest -m security --tb=short -q
 
   frontend-test:
     runs-on: ubuntu-latest
@@ -69,12 +73,16 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend
         run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Lint
+        run: npm run lint
       - name: Production build
         run: npm run build:prod
 
   backend-image:
     needs: backend-test
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || github.ref == 'refs/heads/feature/MIDI' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -97,7 +105,7 @@ jobs:
 
   frontend-image:
     needs: frontend-test
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || github.ref == 'refs/heads/feature/MIDI' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -128,7 +136,7 @@ jobs:
     if: >
       vars.AWS_DEPLOY == 'true' &&
       github.event_name != 'pull_request' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || startsWith(github.ref, 'refs/tags/'))
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feature/midi' || github.ref == 'refs/heads/feature/MIDI' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read

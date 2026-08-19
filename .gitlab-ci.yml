@@ -58,7 +58,9 @@ backend:test:
     - pip install -r requirements-dev.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
     - pip install -e .
   script:
-    - pytest -q --tb=short
+    - pytest -m unit --tb=short -q
+    - pytest -m integration --tb=short -q
+    - pytest -m security --tb=short -q
 
 frontend:test:
   stage: test
@@ -80,6 +82,8 @@ frontend:test:
     - cd frontend
     - npm ci --cache "$npm_config_cache"
   script:
+    - npm test
+    - npm run lint
     - npm run build:prod
 
 # ---------------------------------------------------------------------------
@@ -107,6 +111,7 @@ backend:image:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH == "feature/MIDI"
+    - if: $CI_COMMIT_BRANCH == "feature/midi"
     - if: $CI_COMMIT_TAG
   script:
     - |
@@ -124,6 +129,7 @@ frontend:image:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH == "feature/MIDI"
+    - if: $CI_COMMIT_BRANCH == "feature/midi"
     - if: $CI_COMMIT_TAG
   script:
     - |

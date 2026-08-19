@@ -52,8 +52,13 @@ def ensure_exportable(engine: MidiEngine) -> None:
 
 
 def safe_filename(name: str) -> str:
-    name = name.strip() or "midi_output.mid"
+    """Basename-only MIDI filename for Content-Disposition (no path segments)."""
+    name = (name or "").strip() or "midi_output.mid"
+    name = Path(name.replace("\\", "/")).name
     name = re.sub(r"[^\w.\-]+", "_", name)
+    while ".." in name:
+        name = name.replace("..", "_")
+    name = name.strip("._") or "midi_output"
     if not name.lower().endswith(".mid"):
         name += ".mid"
     return name

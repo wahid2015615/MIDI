@@ -81,10 +81,25 @@ export type ExpressionOptions = {
 
 export type GenerateResult = {
   filename: string;
+  blob: Blob;
+  url: string;
+  bytes: Uint8Array;
   bpm: string | null;
   bars: string | null;
   tracks: string | null;
   ppq?: string | null;
   key?: string | null;
   timeSig?: string | null;
+};
+
+export type StudioMidiResult = GenerateResult & {
+  mode: Mode;
+  quote: string;
+  /** Exact form values at generate time — display these, not SMF headers. */
+  selectedBpm: number;
+  selectedKey: string;
+  selectedTimeSig: string;
+  selectedBars: number | null;
+  style?: string;
+  mood?: string;
 };

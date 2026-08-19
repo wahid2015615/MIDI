@@ -23,3 +23,13 @@ midi-gen = "app.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+markers = [
+  "unit: fast tests with no HTTP TestClient (theory, engine, composers)",
+  "integration: FastAPI TestClient / Studio-shaped generate payloads",
+  "security: auth, CORS, filename, input-cap, probe gates",
+]

@@ -114,7 +114,7 @@ Windows shortcut: `start-frontend.bat` from the repo root.
 - **Mixer** — melody, chords, bass, drums with instrument, channel, volume, pan, mute/solo
 - **Timing** — PPQ, quantize, MPC-style swing, humanize
 - **Expression** — sustain (CC64), modulation (CC1), pitch bend (applied before timing)
-- **Studio** — Next.js UI with downloadable `.mid`
+- **Studio** — Next.js UI with in-page MIDI preview + optional `.mid` download
 - **API & CLI** — FastAPI REST and `midi-gen`
 
 ---
@@ -293,9 +293,9 @@ Repo: [github.com/wahid2015615/MIDI](https://github.com/wahid2015615/MIDI)
 
 | Job | What | When |
 | --- | ---- | ---- |
-| **backend-test** | pytest | Every push / pull request |
-| **frontend-test** | `npm run build:prod` | Every push / pull request |
-| **backend-image** / **frontend-image** | Push to GitHub Container Registry | `main`, `feature/midi`, or tags |
+| **backend-test** | pytest unit + integration + security | Every push / pull request |
+| **frontend-test** | `npm test` (Vitest) + eslint + `build:prod` | Every push / pull request |
+| **backend-image** / **frontend-image** | Push to GitHub Container Registry | `main`, `feature/midi`, `feature/MIDI`, or tags |
 | **deploy-aws** | SSH to EC2, pull images, run containers | Only when `AWS_DEPLOY=true` |
 
 Public repos use free standard GitHub-hosted runners. Optional variable: `NEXT_PUBLIC_API_URL` (baked into the frontend image).

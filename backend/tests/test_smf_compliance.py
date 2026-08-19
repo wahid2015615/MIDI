@@ -143,6 +143,33 @@ def test_same_pitch_overlap_becomes_legato(tmp_path: Path) -> None:
     assert events[3][1] == "off"
 
 
+def test_same_pitch_same_start_keeps_longer_note(tmp_path: Path) -> None:
+    """Same pitch + same start must not NameError; keep the longer note."""
+    engine = MidiEngine(bpm=120, ppq=480)
+    track = engine.add_track("Melody")
+    track.add_note(60, 0.0, 1.0, 80)
+    track.add_note(60, 0.0, 2.0, 90)
+    path = tmp_path / "same_start.mid"
+    engine.export(path, file_type=1)
+    validate_smf_file(path, 1)
+
+    ons = 0
+    last_off = 0
+    mid = MidiFile(path)
+    for tr in mid.tracks:
+        abs_tick = 0
+        for msg in tr:
+            abs_tick += msg.time
+            if msg.type == "note_on" and msg.velocity > 0 and msg.note == 60:
+                ons += 1
+            elif (
+                msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0)
+            ) and msg.note == 60:
+                last_off = abs_tick
+    assert ons == 1
+    assert last_off == 960
+
+
 def test_channel_assignment_reserves_drums() -> None:
     engine = MidiEngine(bpm=120)
     melodic_channels = []

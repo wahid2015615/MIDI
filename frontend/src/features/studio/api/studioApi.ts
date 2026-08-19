@@ -176,7 +176,7 @@ function midiContentTypeOk(contentType: string | null): boolean {
   );
 }
 
-async function downloadMidi(
+async function fetchMidi(
   path: string,
   body: unknown,
   fallbackName: string,
@@ -215,18 +215,11 @@ async function downloadMidi(
     const disposition = res.headers.get("Content-Disposition") || "";
     const filename = parseContentDispositionFilename(disposition, fallbackName);
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // Delay revoke — some browsers (esp. Firefox) need the URL alive after click().
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-
     return {
       filename,
+      blob,
+      url: URL.createObjectURL(blob),
+      bytes,
       bpm: res.headers.get("X-MIDI-BPM"),
       bars: res.headers.get("X-MIDI-Bars"),
       tracks: res.headers.get("X-MIDI-Tracks"),
@@ -291,6 +284,16 @@ export type MetaStylesResponse = {
   ppq_options?: number[];
 };
 
+/** User-initiated download from an in-studio preview (does not revoke the URL). */
+export function triggerMidiDownload(url: string, filename: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export async function generateFromText(
   payload: {
     prompt: string;
@@ -312,7 +315,7 @@ export async function generateFromText(
   },
   options?: RequestOptions,
 ) {
-  return downloadMidi(
+  return fetchMidi(
     "/generate/text",
     payload,
     payload.filename || "text_output.mid",
@@ -341,7 +344,7 @@ export async function generateFromChords(
   },
   options?: RequestOptions,
 ) {
-  return downloadMidi(
+  return fetchMidi(
     "/generate/chords",
     payload,
     payload.filename || "chords_output.mid",
@@ -365,7 +368,7 @@ export async function generateFromNotes(
   },
   options?: RequestOptions,
 ) {
-  return downloadMidi(
+  return fetchMidi(
     "/generate/notes",
     payload,
     payload.filename || "notes_output.mid",

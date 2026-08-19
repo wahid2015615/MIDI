@@ -1,6 +1,6 @@
 # MIDIgen Frontend
 
-Next.js studio UI for [MIDIgen](../README.md). Compose from text, chords, or note lists, adjust mix and timing, and download Standard MIDI (`.mid`) files from the backend API.
+Next.js studio UI for [MIDIgen](../README.md). Compose from text, chords, or note lists, adjust mix and timing, preview the result in Studio, then download Standard MIDI (`.mid`) files from the backend API.
 
 ## Requirements
 
@@ -42,6 +42,7 @@ From the repo root on Windows: `start-frontend.bat`.
 | `npm run build` | Production build         |
 | `npm run start` | Serve production on **:3001** |
 | `npm run lint`  | ESLint                   |
+| `npm test`      | Vitest unit tests        |
 
 ## Features
 
@@ -51,6 +52,8 @@ From the repo root on Windows: `start-frontend.bat`.
 - Timing: PPQ, quantize, **MPC-style swing** (50 = straight, ~66 = triplet), humanize
 - Expression: sustain, modulation, pitch bend
 - Export Type 0 or Type 1 MIDI
+- **In-studio preview** after generate: waveform, play/pause, key/BPM/bars tags; **Download MIDI** is opt-in (file is not auto-saved)
+- Motion in `src/app/globals.css` (page entrance, hover, generate sheen, result player, dropdowns; respects `prefers-reduced-motion`)
 - Live API / local model status indicators (via `/health?probe=1`) — model required only for Text
 - Bars UI range **1–128** (API allows up to 512)
 
@@ -70,7 +73,7 @@ For same-tick chord stacks in Notes/Chords `.mid` output, leave **Humanize** off
 
 | Endpoint | Purpose |
 | -------- | ------- |
-| `POST /generate/text\|chords\|notes` | Generate and download `.mid` |
+| `POST /generate/text\|chords\|notes` | Generate `.mid` (Studio previews in-page; download is a button) |
 | `POST /generate/cancel` | Abort in-flight Text (GGUF) generation |
 | `POST /parse/text` | Auto-fill detected prompt fields (text mode) |
 | `GET /health?probe=1` | API + local model status |
@@ -85,7 +88,7 @@ Not called by the current UI (REST still available):
 - `GET /meta/ai` — covered by `/health`
 - `duplicate_score_meta` — not sent; API default `false` (Conductor-only meta)
 
-The on-page **Export preview** panel is a client summary, not the preview API.
+Mode-specific **examples** sit under the compose input (4 per tab, different formats). There is no Session summary sidebar.
 
 ## Mixer behavior
 
@@ -114,7 +117,7 @@ Example: 66% ≈ triplet → delay ≈ 0.32. Do not confuse this with raw API `T
 frontend/
 ├── src/
 │   ├── app/                    # App Router (layout, page, styles)
-│   ├── features/studio/        # Studio UI, API client, types, constants
+│   ├── features/studio/        # Studio UI, API client, MIDI preview, types
 │   └── shared/ui/              # Shared form helpers
 ├── .env.example
 ├── package.json

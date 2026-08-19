@@ -7,7 +7,7 @@
   Version          : 0.1.0
   Status           : Authoritative engineering reference
   Audience         : Backend / frontend engineers, QA, API integrators
-  Last updated     : 2026-08-12 (Docker Compose, GitLab CI, deploy checklist)
+  Last updated     : 2026-08-18 (CI unit/integration/security + Studio tests)
   Format           : Plain text
   Companion guides : README.md | backend/README.md | frontend/README.md
   Live schemas     : http://127.0.0.1:8000/docs  (when API is running)
@@ -98,7 +98,7 @@ NON-GOALS
 
   +-----------------------------------------------------------------+
   |                  Next.js Studio (frontend :3001)                 |
-  |    modes · mixer · timing · expression · download .mid          |
+  |    modes · mixer · timing · expression · preview / download .mid  |
   +------------------------------+----------------------------------+
                                  | HTTP JSON
                                  v
@@ -660,7 +660,9 @@ Empty CORS_ORIGIN_REGEX disables the regex.
   ------------------------------------  ---------------------------------------
   src/app/                              App Router, layout, globals.css
   src/features/studio/components/       StudioPage.tsx (main UI + mixer)
-  src/features/studio/api/studioApi.ts  Fetch + timeouts + .mid sniff download
+                                        MidiResultCard.tsx (post-generate preview)
+  src/features/studio/midi/             SMF parse + Web Audio preview player
+  src/features/studio/api/studioApi.ts  Fetch + timeouts + in-studio .mid blob
   src/features/studio/types.ts          Options types
   src/features/studio/constants.ts      Catalog fallbacks; bars UI 1–128
   src/shared/ui/                        Form helpers
@@ -675,8 +677,12 @@ User flow:
      without the local model)
   4. Mixer: role pills, Mute/Solo, instruments, channels, vol/pan
   5. Swing = MPC 50–75% (converted before POST)
-  6. Generate → download .mid via /generate/text|chords|notes
-     (response must look like SMF: MThd; Content-Type checked)
+  6. Generate → compose form hides; result card shows waveform + play.
+     Tags (key / BPM / meter / bars / style / mood / mode) are the values
+     the user submitted — not SMF header tokens (e.g. "C" vs "C Major")
+     or engine duration_bars. Download is opt-in. "+ Create another"
+     clears the preview and returns to compose. Next generate shows the
+     new file. (response must look like SMF: MThd; Content-Type checked)
   7. Cancel (Text) → POST /generate/cancel then AbortController abort
 
 Studio defaults (current UI):
@@ -690,7 +696,9 @@ Studio API usage notes (current UI):
     /health, /meta/instruments, /meta/styles.
   * Does NOT call POST /generate/text/preview (backend-only) or GET /meta/ai
     (AI status comes from /health).
-  * UI label "Export preview" is an on-page summary panel, not the preview API.
+  * Result-card tags use the submitted form values (not SMF header tokens).
+  * Studio motion lives in globals.css (entrance, hover, generate sheen,
+    result/player, dropdowns). Honors prefers-reduced-motion.
   * Sends file_type; does NOT send duplicate_score_meta (API default false =
     Conductor-only meta on Type 1).
 
@@ -847,6 +855,9 @@ Windows shortcuts (repo root): start-backend.bat | start-frontend.bat
 
   Suite                       Focus
   --------------------------  -------------------------------------------------
+  pytest -m unit              theory, engine, composer, timing, SMF export
+  pytest -m integration       FastAPI TestClient + Studio-shaped generate
+  pytest -m security          API token, probe gate, filename, input caps, CORS
   test_smf_compliance.py      Type 0/1, overlaps, conductor meta duplex flag
   test_bugfixes_export.py     Solo, swing MPC, sustain pairs, active channels
   test_medium_bugfixes.py     Schema / composer edge cases
@@ -858,6 +869,14 @@ Windows shortcuts (repo root): start-backend.bat | start-frontend.bat
   test_model_idle_unload.py   Idle unload default/env; timer / in-flight
   test_high_priority_fixes.py Parse detection; chord symbols; drum-kit on
                               melody rejected; compose lock
+  test_http_api.py            Health, generate chords/notes, parse, caps
+  test_unit_core.py           Notes/chords theory, BPM clamp, safe_filename
+  test_security.py            Token, remote probe, path-safe filenames
+  frontend npm test           Vitest: parseSmf, formatApiDetail, resolveApiBase
+
+Markers live in backend/pyproject.toml; tests/conftest.py auto-marks files.
+CI (GitHub + GitLab) runs unit → integration → security, then frontend
+vitest + eslint + production build.
 
 Add tests when changing export order, mixer rules, swing, expression/timing,
 or SMF validation.
@@ -886,10 +905,11 @@ or SMF validation.
 
   GitLab CI
   ---------
-  .gitlab-ci.yml runs backend pytest + frontend lint/build, then pushes
+  .gitlab-ci.yml runs backend unit + integration + security pytest, then
+  frontend vitest + eslint + production build, then pushes
   midigen/backend and midigen/frontend images to the GitLab Container Registry
-  on the default branch, feature/MIDI, or tags. Deploy to the VM is manual
-  (docker compose pull / up) so Free-tier CI minutes stay low.
+  on the default branch, feature/MIDI, feature/midi, or tags. Deploy to the VM
+  is manual (docker compose pull / up) so Free-tier CI minutes stay low.
 
 Notes:
   * Optional MIDIGEN_API_TOKEN (mirror NEXT_PUBLIC_API_TOKEN on Studio)
@@ -912,9 +932,11 @@ Notes:
                   when HOST is non-loopback.
   Input caps      prompt/parse 8000; progression 4000; notes 2000×500
   CORS            Loopback HOST → LAN regex default; exposed HOST → opt-in
-  Filenames       safe_filename before Content-Disposition
+  Filenames       safe_filename uses basename only (no .. / path segs)
+                  before Content-Disposition
   LLM input       Untrusted; constrained by schemas / catalogs
   Dependencies    Range pins in requirements.txt / pyproject.toml
+  CI security     pytest -m security (token, probe, filename, input caps)
 
 
 ================================================================================
@@ -1053,6 +1075,19 @@ Documented intentionally (not silent bugs):
 
   Date         Notes
   -----------  ----------------------------------------------------------------
+  2026-08-18   Studio: generate keeps .mid in-page (waveform, Web Audio
+               preview, metadata tags); download is opt-in. High-contrast
+               black + violet/magenta palette. Studio motion in globals.css
+               (entrance, hover, generate sheen, player, dropdowns;
+               prefers-reduced-motion). SMF parse + preview player under
+               features/studio/midi/. Bugfixes: same-pitch same-start export
+               NameError; preview voices stop on pause/seek; SMF parse
+               converts notes after tempo map sort and keeps stacked
+               same-key ons; IconSelect menu positioned before paint;
+               result-card play no longer restarts entrance; alerts render
+               above sticky generate dock. CI: pytest unit / integration /
+               security markers; frontend Vitest + eslint + build.
+               safe_filename uses basename only.
   2026-08-12   Docker: backend/frontend Dockerfiles, docker-compose.yml,
                .env.docker.example, .gitlab-ci.yml (test + registry push);
                Next.js output standalone + build:prod; requirements-dev.txt.

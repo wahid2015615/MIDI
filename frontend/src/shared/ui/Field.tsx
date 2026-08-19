@@ -11,7 +11,7 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className="block">
+    <div className="block" role="group" aria-label={label}>
       <div className="mb-1.5 flex items-baseline justify-between gap-2">
         <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
           {label}

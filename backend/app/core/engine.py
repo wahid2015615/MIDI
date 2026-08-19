@@ -375,7 +375,7 @@ class MidiEngine:
             by_pitch.setdefault(int(note.pitch), []).append(note)
 
         resolved: list[NoteEvent] = []
-        for pitch_notes in by_pitch.values():
+        for pitch, pitch_notes in by_pitch.items():
             ordered = sorted(
                 pitch_notes, key=lambda n: (n.start_beat, n.duration_beats)
             )

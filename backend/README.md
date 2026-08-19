@@ -151,6 +151,19 @@ python examples/generate_samples.py
 
 Text (AI) samples require `backend/models/Qwen3-4B-Q4_K_M.gguf`. Chords/notes samples do not.
 
+## Tests
+
+From `backend/` (needs `pip install -r requirements-dev.txt` and `pip install -e .`):
+
+```powershell
+pytest -m unit
+pytest -m integration
+pytest -m security
+pytest
+```
+
+`pytest` with no `-m` still runs the full suite. Markers are defined in `pyproject.toml`.
+
 ## Related docs
 
 - [DOCUMENTATION.txt](../DOCUMENTATION.txt) — full engineering reference
